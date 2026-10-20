@@ -77,7 +77,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$work" ]] || { usage >&2; exit 2; }
-mkdir -p "$work"/{iso,installers,packer,generated}
+mkdir -p "$work"/{iso,installers}
 
 echo "== verifying the ISO" >&2
 inspect_args=(--url "$iso_url" --dest "$work/iso/windows.iso")
@@ -175,6 +175,10 @@ mkdir -p "$work/installers/agent"
 guest_agent="$work/installers/agent/qemu-ga-x86_64.msi"
 
 echo "== running packer" >&2
+# Packer refuses to build into a directory that already exists, so the output
+# path is cleared instead of created.
+outdir="$work/output"
+rm -rf "$outdir"
 pushd "$ROOT/packer" >/dev/null
 packer init .
 packer build \
@@ -190,11 +194,11 @@ packer build \
   -var "cpus=$cpus" \
   -var "memory_mb=$memory_mb" \
   -var "ffmpeg_url=$ffmpeg_url" \
-  -var "output_directory=$work/packer" \
+  -var "output_directory=$outdir" \
   .
 popd >/dev/null
 
-built="$work/packer/windows-ltsc-2024"
+built="$outdir/windows-ltsc-2024"
 [[ -f "$built" ]] || { echo "packer produced no disk at $built" >&2; exit 1; }
 
 output_disk=${output_disk:-$work/disk.qcow2}
