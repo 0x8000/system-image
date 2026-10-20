@@ -62,6 +62,26 @@ def encoded_bootstrap() -> str:
     return base64.b64encode(text.encode("utf-16-le")).decode()
 
 
+BEGIN = "<!-- DRIVER_COMPONENT_BEGIN -->"
+END = "<!-- DRIVER_COMPONENT_END -->"
+
+
+def strip_driver_components(text: str) -> str:
+    """Remove every block between the driver component markers.
+
+    Dropping the component entirely is not the same as rendering it with an
+    empty DriverPaths: setup still acts on a component that is present.
+    """
+    while BEGIN in text:
+        start = text.index(BEGIN)
+        stop = text.index(END, start) + len(END)
+        # Also drop the line break that followed the block.
+        if text[stop:stop + 1] == "\n":
+            stop += 1
+        text = text[:start] + text[stop:]
+    return text
+
+
 def render(template: str, image_name: str, *, drivers: bool) -> str:
     """Fill the template.
 
@@ -72,6 +92,8 @@ def render(template: str, image_name: str, *, drivers: bool) -> str:
     for placeholder in ("__IMAGE_NAME__", "__DRIVER_PATHS__", "__WINRM_BOOTSTRAP__"):
         if placeholder not in template:
             raise ValueError(f"the answer template has no {placeholder}")
+    if not drivers:
+        template = strip_driver_components(template)
     return (
         template.replace("__IMAGE_NAME__", image_name)
         .replace("__DRIVER_PATHS__", driver_paths() if drivers else "")

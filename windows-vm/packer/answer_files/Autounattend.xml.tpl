@@ -13,6 +13,7 @@
       <UserLocale>en-US</UserLocale>
     </component>
 
+    <!-- DRIVER_COMPONENT_BEGIN -->
     <!-- This component MUST precede Microsoft-Windows-Setup in this pass.
          Windows processes components in document order, and the disk
          configuration in Setup cannot see a virtio disk until these drivers
@@ -23,6 +24,7 @@
 __DRIVER_PATHS__
       </DriverPaths>
     </component>
+    <!-- DRIVER_COMPONENT_END -->
     <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
       <!-- The image is a disposable test device and has no TPM. Bypassing the
            checks is deliberate: adding a TPM to the build would make every
@@ -116,6 +118,17 @@ __DRIVER_PATHS__
   </settings>
 
   <settings pass="offlineServicing">
+    <!-- DRIVER_COMPONENT_BEGIN -->
+    <!-- PnpCustomizationsWinPE only makes the drivers usable inside setup.
+         The installed image needs them too: a virtio disk has no storage
+         driver and a virtio NIC has no network driver without this pass. -->
+    <component name="Microsoft-Windows-PnpCustomizationsNonWinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <DriverPaths>
+__DRIVER_PATHS__
+      </DriverPaths>
+    </component>
+    <!-- DRIVER_COMPONENT_END -->
+
     <component name="Microsoft-Windows-LUA-Settings" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
       <EnableLUA>false</EnableLUA>
     </component>

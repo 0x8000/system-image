@@ -143,8 +143,21 @@ class AnswerFileTest(unittest.TestCase):
             self.assertIn("-EncodedCommand ", text)
             payload = text.split("-EncodedCommand ", 1)[1].split("<", 1)[0].strip()
             script = base64.b64decode(payload).decode("utf-16-le")
-            self.assertIn("winrm set winrm/config/service", script)
+            # The bootstrap must configure the service and allow a local
+            # account to administer it; the exact verb is not the contract.
+            self.assertIn("winrm/config/service", script)
+            self.assertIn("AllowUnencrypted", script)
             self.assertIn("LocalAccountTokenFilterPolicy", script)
+            # It must not abort on the first non-zero exit code, because
+            # `winrm set` fails before quickconfig has created the listener.
+            # Only executed lines count; the comment above explains the rule.
+            code = [
+                line for line in script.splitlines()
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+            self.assertFalse(
+                [line for line in code if "ErrorActionPreference" in line and '"Stop"' in line]
+            )
 
     def test_driver_component_precedes_setup(self) -> None:
         # Windows processes components in document order within a pass. If

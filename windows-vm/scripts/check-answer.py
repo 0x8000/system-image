@@ -37,12 +37,34 @@ def check(path: Path, image_name: str, *, drivers: bool = True) -> list[str]:
         for driver in REQUIRED_DRIVERS:
             if not any(driver in path for path in paths):
                 problems.append(f"no driver path for {driver}")
+        components = [
+            element.get("name")
+            for element in root.iter()
+            if element.tag.endswith("component")
+            and "PnpCustomizations" in (element.get("name") or "")
+        ]
+        # WinPE needs the driver to see the disk during setup; the installed
+        # image needs it to boot and to bring up the NIC.
+        for required in (
+            "Microsoft-Windows-PnpCustomizationsWinPE",
+            "Microsoft-Windows-PnpCustomizationsNonWinPE",
+        ):
+            if required not in components:
+                problems.append(f"missing driver component {required}")
     else:
         unexpected = [p for p in paths if p.startswith(("D:", "E:", "F:", "G:", "H:"))]
         # Setup treats an unreachable driver path as a fatal error, and a SATA
         # build ships no driver tree, so the paths must not be there at all.
         if unexpected:
             problems.append(f"driver paths present without a driver CD: {unexpected[:3]}")
+        components = [
+            element.get("name")
+            for element in root.iter()
+            if element.tag.endswith("component")
+            and "PnpCustomizations" in (element.get("name") or "")
+        ]
+        if components:
+            problems.append(f"driver components present without a driver CD: {components}")
     return problems
 
 
