@@ -236,7 +236,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             qemu-utils qemu-system-x86 ovmf swtpm \
-            p7zip-full wimtools curl ca-certificates python3
+            p7zip-full wimtools xorriso curl ca-certificates python3
           # Packer is small and its install is the only unpinned tool here.
           PACKER_VERSION=1.11.2
           curl --fail --silent --show-error --location \
@@ -276,7 +276,10 @@ jobs:
           if [ -n "$ISO_SHA256" ]; then
             args+=(--iso-sha256 "$ISO_SHA256")
           fi
-          windows-vm/scripts/build-image.sh "${args[@]}" | tee "$WORK_DIR/build.log"
+          # `set -o pipefail` keeps packer's exit status; without it `tee`
+          # would succeed and the next step would run against a missing disk.
+          set -o pipefail
+          windows-vm/scripts/build-image.sh "${args[@]}" 2>&1 | tee "$WORK_DIR/build.log"
 
       - name: Split the disk into registry-sized layers
         run: |
