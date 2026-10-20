@@ -2,18 +2,36 @@
 # Make /dev/kvm usable by the current user, or explain why it cannot be.
 #
 # GitHub's hosted Linux runners expose KVM but leave it owned by the `kvm`
-# group, and the runner user is not in it. This is the udev rule GitHub's own
-# Android emulator documentation uses. It needs sudo, and it has to run in
-# every job that starts a VM: each job gets a fresh machine.
+# group, which the runner user is not in. Two things matter:
+#
+#  * the udev rule below is the one GitHub's Android emulator documentation
+#    uses, and it is what survives on a long-lived machine;
+#  * `access(2)` (what `test -w` uses) can still report EACCES on a device
+#    whose mode already looks permissive, so success is decided by actually
+#    opening the device, which is what qemu does.
 set -euo pipefail
+
+can_open() {
+  python3 - <<'PY'
+import os
+import sys
+
+try:
+    fd = os.open("/dev/kvm", os.O_RDWR)
+except OSError as error:
+    print(f"open failed: {error}", file=sys.stderr)
+    sys.exit(1)
+os.close(fd)
+PY
+}
 
 if [ ! -e /dev/kvm ]; then
   echo "/dev/kvm is not present on this machine" >&2
   exit 1
 fi
 
-if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-  echo "kvm-already-usable"
+if can_open; then
+  echo "kvm-usable"
   exit 0
 fi
 
@@ -22,12 +40,15 @@ echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
   sudo tee "$rule" >/dev/null
 sudo udevadm control --reload-rules
 sudo udevadm trigger --name-match=kvm
+# A container's /dev is often a bind mount that udev does not manage, so the
+# mode is also set directly; both steps are idempotent.
+sudo chmod 0666 /dev/kvm || true
 
-if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+if can_open; then
   echo "kvm-unlocked"
   exit 0
 fi
 
-echo "/dev/kvm is present but not writable even after the udev rule" >&2
+echo "/dev/kvm cannot be opened for read/write even after the udev rule and chmod" >&2
 ls -l /dev/kvm >&2 || true
 exit 1
