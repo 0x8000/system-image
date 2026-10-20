@@ -2,6 +2,8 @@ MACOS_IMAGE ?= ghcr.io/0x8000/aarch64-apple-darwin
 MACOS_15_TAG ?= macos-15.5
 MACOS_26_TAG ?= macos-26.1
 MACOS_TAG ?= $(MACOS_15_TAG)
+WINDOWS_IMAGE ?= ghcr.io/0x8000/x86_64-pc-windows-msvc
+WINDOWS_TAG ?= msvc-14.44.17.14
 
 IMAGE ?= $(MACOS_IMAGE)
 TAG ?= $(MACOS_TAG)
@@ -13,6 +15,7 @@ BUILD_ARGS ?=
 .PHONY: build verify smoke \
 	macos-15-build macos-15-verify macos-15-smoke \
 	macos-26-build macos-26-verify macos-26-smoke \
+	windows-build windows-verify windows-smoke \
 	verify-all clean
 
 build:
@@ -70,7 +73,31 @@ macos-26-verify: macos-26-build
 macos-26-smoke: macos-26-build
 	$(MAKE) smoke IMAGE="$(MACOS_IMAGE)" TAG="$(MACOS_26_TAG)"
 
-verify-all: macos-15-verify macos-26-verify
+windows-build:
+	$(MAKE) build \
+		IMAGE="$(WINDOWS_IMAGE)" \
+		TAG="$(WINDOWS_TAG)" \
+		DOCKERFILE=windows/Dockerfile
+
+windows-verify: windows-build
+	docker run --rm --platform "$(PLATFORM)" "$(WINDOWS_IMAGE):$(WINDOWS_TAG)" \
+		/usr/local/bin/verify-image
+
+windows-smoke: windows-build
+	mkdir -p "$(BUILD_DIR)/windows"
+	printf '%s\n' \
+		'#include <stdio.h>' \
+		'int main(void) {' \
+		'  puts("hello from Windows");' \
+		'  return 0;' \
+		'}' > "$(BUILD_DIR)/windows/hello.c"
+	docker run --rm --platform "$(PLATFORM)" \
+		--volume "$(CURDIR)/$(BUILD_DIR)/windows:/workspace" \
+		--workdir /workspace \
+		"$(WINDOWS_IMAGE):$(WINDOWS_TAG)" \
+		bash -ec 'clang-cl $$CL_FLAGS hello.c /Fe:hello.exe && file hello.exe && wine hello.exe'
+
+verify-all: macos-15-verify macos-26-verify windows-verify
 
 clean:
 	rm -rf "$(BUILD_DIR)"

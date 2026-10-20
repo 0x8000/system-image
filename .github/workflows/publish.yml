@@ -8,17 +8,19 @@ on:
       - Makefile
       - README.md
       - macos/**
+      - windows/**
       - .github/workflows/publish.yml
   pull_request:
     paths:
       - Makefile
       - README.md
       - macos/**
+      - windows/**
       - .github/workflows/publish.yml
   workflow_dispatch:
     inputs:
       version:
-        description: 'Image version to build (e.g. all, macos-15.5, macos-26.1)'
+        description: 'Image version to build (e.g. all, macos-15.5, macos-26.1, msvc-14.44.17.14)'
         required: false
         default: 'all'
         type: string
@@ -58,6 +60,14 @@ jobs:
               "tag": "macos-26.1",
               "build_args": "MACOS_SDK_VERSION=26.1",
               "cache_scope": "system-image-macos-26.1"
+            },
+            {
+              "name": "windows",
+              "dockerfile": "windows/Dockerfile",
+              "image": "ghcr.io/${{ github.repository_owner }}/x86_64-pc-windows-msvc",
+              "tag": "msvc-14.44.17.14",
+              "build_args": "",
+              "cache_scope": "system-image-windows"
             }
           ]
 
@@ -76,16 +86,20 @@ jobs:
                           match = True
                       elif p == "macos" and name.startswith("macos"):
                           match = True
+                      elif p in ("windows", "msvc") and name == "windows":
+                          match = True
                       elif p == "15.5" and tag == "macos-15.5":
                           match = True
                       elif p == "26.1" and tag == "macos-26.1":
+                          match = True
+                      elif p == "14.44.17.14" and tag == "msvc-14.44.17.14":
                           match = True
                   if match and item not in selected:
                       selected.append(item)
 
           if not selected:
               sys.stderr.write(f"Error: No matching targets found for input version: {raw_input}\n")
-              sys.stderr.write("Available targets: all, macos-15.5 (15.5), macos-26.1 (26.1)\n")
+              sys.stderr.write("Available targets: all, macos-15.5 (15.5), macos-26.1 (26.1), msvc-14.44.17.14 (windows)\n")
               sys.exit(1)
 
           matrix_json = json.dumps({"include": selected})

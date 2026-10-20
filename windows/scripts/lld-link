@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -flavor)
+      if [ "${2:-}" != "link" ]; then
+        echo "unsupported lld-link flavor: ${2:-<missing>}" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    -flavor=link)
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+exec /usr/lib/llvm-19/bin/lld-link \
+  /libpath:/opt/xwin/crt/lib/x86_64 \
+  /libpath:/opt/xwin/sdk/lib/um/x86_64 \
+  /libpath:/opt/xwin/sdk/lib/ucrt/x86_64 \
+  "${args[@]}"
