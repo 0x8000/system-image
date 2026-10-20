@@ -136,6 +136,41 @@ jobs:
           fi
           echo "commit=$(git -C "$dir" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Pin a stable rust toolchain
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/android-cuttlefish/base/cvd/toolchain/rust.MODULE.bazel"
+          if ! grep -q "rust.toolchain(" "$file"; then
+            # unix 1.28.x calls eq_ignore_ascii_case as a const fn, which needs
+            # rustc >= 1.86 to compile. This tag registers no explicit toolchain,
+            # so rules_rust falls back to the container's system rustc. Pin a
+            # stable version known to rules_rust 0.68.1 (same fix as upstream
+            # google/android-cuttlefish commit 03ffb05cf, which uses 1.99.0 with
+            # an unpinned newer rules_rust).
+            cat > "$file" <<'EOF'
+          rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+          rust_host_tools = use_extension("@rules_rust//rust:extensions.bzl", "rust_host_tools")
+
+          rust.toolchain(
+              # Explicitly choose a rust toolchain version instead of relying on
+              # the system rustc: uuid 1.28 needs rustc >= 1.86; 1.91.1 is the
+              # newest stable known to rules_rust 0.68.1's dist manifest.
+              edition = "2021",
+              versions = ["1.91.1"],
+          )
+
+          rust_host_tools.host_tools(
+              name = "rust_host_tools_nightly",
+              version = "nightly",
+          )
+          use_repo(
+              rust_host_tools,
+              "rust_host_tools_nightly",
+          )
+          EOF
+          fi
+          grep -n 'versions = ' "$file"
+
       - name: Build Debian packages (base, frontend)
         run: |
           set -euo pipefail
