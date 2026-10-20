@@ -1,0 +1,319 @@
+name: Windows LTSC image
+
+# Builds the Windows 11 Enterprise LTSC 2024 golden disk the FastNet BDD suite
+# drives, and publishes it to GitHub Container Registry as a split-layer OCI
+# image. The disk is too large for a release asset workflow that has to stay
+# inside the API's upload limits, and GHCR layers give the consumer a normal
+# `docker pull`.
+#
+# The build needs hardware virtualisation. GitHub's standard hosted runners do
+# not expose /dev/kvm, so the probe job decides everything else: without KVM
+# there is no point starting a 40-minute CPU-emulated Windows install.
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_url:
+        description: "Windows ISO URL (default: Windows 11 Enterprise LTSC 2024 evaluation)"
+        required: false
+        default: "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_LTSC_EVAL_x64FRE_en-us.iso"
+      iso_sha256:
+        description: "Expected ISO sha256 (empty records the downloaded hash)"
+        required: false
+        default: ""
+      image_name:
+        description: "Edition to install"
+        required: false
+        default: "Windows 11 Enterprise LTSC 2024 Evaluation"
+      image_tag:
+        description: "GHCR tag to publish"
+        required: false
+        default: "ltsc2024"
+      runner:
+        description: "Runner label; must expose /dev/kvm"
+        required: false
+        default: "ubuntu-24.04"
+      tcg:
+        description: "Allow CPU emulation when /dev/kvm is missing (very slow)"
+        type: boolean
+        required: false
+        default: false
+  pull_request:
+    paths:
+      - ".github/workflows/windows-image.yml"
+      - "windows-vm/**"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: windows-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/windows-vm
+  DEFAULT_ISO_URL: "https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_LTSC_EVAL_x64FRE_en-us.iso"
+  DEFAULT_IMAGE_NAME: "Windows 11 Enterprise LTSC 2024 Evaluation"
+
+jobs:
+  # Cheap checks that do not need a machine: the shell, the renderer and the
+  # OCI splitter all run on a plain runner, so a typo fails here in a minute
+  # instead of after a full Windows install.
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shell and image tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck qemu-utils python3
+
+      - name: Shell syntax and shellcheck
+        run: |
+          shellcheck windows-vm/scripts/*.sh
+          for script in windows-vm/scripts/*.sh; do bash -n "$script"; done
+
+      - name: Python unit tests
+        run: python3 -m unittest discover -s windows-vm/tests -v
+
+      - name: Render and validate the answer file
+        run: |
+          python3 -m py_compile windows-vm/scripts/render-answer.py \
+            windows-vm/scripts/check-answer.py
+          for edition in \
+            "Windows 11 Enterprise LTSC 2024 Evaluation" \
+            "Windows 11 IoT Enterprise LTSC Evaluation"; do
+            python3 windows-vm/scripts/render-answer.py \
+              --template windows-vm/packer/answer_files/Autounattend.xml.tpl \
+              --output /tmp/Autounattend.xml \
+              --image-name "$edition"
+            python3 windows-vm/scripts/check-answer.py \
+              --answer /tmp/Autounattend.xml \
+              --image-name "$edition"
+          done
+
+      - name: Check the Packer template
+        run: |
+          curl --fail --silent --show-error --location \
+            "https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_linux_amd64.zip" \
+            --output /tmp/packer.zip
+          unzip -o -q /tmp/packer.zip -d /tmp/packer-bin
+          sudo install -m 0755 /tmp/packer-bin/packer /usr/local/bin/packer
+          # Packer resolves the plugin through GitHub's API; an authenticated
+          # token keeps a busy repository off the anonymous rate limit.
+          export PACKER_GITHUB_API_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          cd windows-vm/packer
+          # `validate` stats the CD-ROM inputs, so the rendered answer file and
+          # a stand-in driver tree must exist; their contents are checked by
+          # the renderer test above and by the build itself.
+          mkdir -p generated/cd/drivers/viostor/w11/amd64
+          # Packer stats the upload sources too, so placeholders stand in for
+          # the real installers; nothing is executed during validate.
+          : >/tmp/ga.msi
+          : >/tmp/wv2.exe
+          : >/tmp/npcap.exe
+          python3 ../scripts/render-answer.py \
+            --template answer_files/Autounattend.xml.tpl \
+            --output generated/cd/Autounattend.xml
+          cp scripts/00-enable-winrm.ps1 generated/cd/
+          # `packer init` downloads the plugin; `validate` type-checks the
+          # template without booting anything.
+          packer init .
+          packer validate \
+            -var "iso_url=/tmp/does-not-exist.iso" \
+            -var "iso_checksum=sha256:$(printf '0%.0s' {1..64})" \
+            -var "guest_agent_msi=/tmp/ga.msi" \
+            -var "webview2_installer=/tmp/wv2.exe" \
+            -var "npcap_installer=/tmp/npcap.exe" \
+            .
+
+      - name: Exercise the OCI splitter and reassembler
+        run: |
+          mkdir -p /tmp/probe
+          qemu-img create -f qcow2 /tmp/probe/disk.qcow2 64M >/dev/null
+          windows-vm/scripts/make-oci-context.sh \
+            --disk /tmp/probe/disk.qcow2 \
+            --output-dir /tmp/probe/ctx \
+            --part-size 4M
+          test -f /tmp/probe/ctx/Dockerfile
+          test "$(ls /tmp/probe/ctx/parts | wc -l)" -gt 1
+          grep -q '^FROM scratch$' /tmp/probe/ctx/Dockerfile
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path("/tmp/probe/ctx/manifest.json").read_text())
+          assert manifest["parts"] == len(list(Path("/tmp/probe/ctx/parts").iterdir()))
+          assert manifest["format"] == "qcow2"
+          PY
+          docker build -q -t windows-vm-splitter:probe /tmp/probe/ctx
+          container=$(docker create windows-vm-splitter:probe)
+          docker cp "$container:/parts" /tmp/probe/extracted/
+          docker rm -f "$container" >/dev/null
+          # The same concatenation fetch-image.sh performs, minus the pull.
+          cat /tmp/probe/extracted/parts/disk.qcow2.part-* > /tmp/probe/joined.qcow2
+          cmp /tmp/probe/disk.qcow2 /tmp/probe/joined.qcow2
+
+  # Whether the image can boot at all decides the rest of the run. A missing
+  # /dev/kvm is reported as a skipped build rather than a 40-minute TCG
+  # install that nobody asked for.
+  probe:
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 10
+    outputs:
+      accelerator: ${{ steps.kvm.outputs.accelerator }}
+      bootable: ${{ steps.kvm.outputs.bootable }}
+      work_mount: ${{ steps.kvm.outputs.work_mount }}
+    steps:
+      - id: kvm
+        env:
+          # PR events have no workflow inputs, so the default is resolved here
+          # rather than repeated in every expression.
+          TCG: ${{ github.event.inputs.tcg || 'false' }}
+        run: |
+          # GitHub's hosted Linux runners expose /dev/kvm but leave it owned by
+          # the `kvm` group. The Android emulator documentation ships this exact
+          # udev rule for that; without it the device is present but unusable.
+          if [ ! -w /dev/kvm ] && [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+              sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "accelerator=kvm" >>"$GITHUB_OUTPUT"
+            echo "bootable=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::/dev/kvm is available; the image builds with hardware acceleration"
+            # Prove it accelerates rather than merely existing.
+            if command -v qemu-system-x86_64 >/dev/null; then
+              qemu-system-x86_64 --version | head -1
+            fi
+          else
+            echo "accelerator=tcg" >>"$GITHUB_OUTPUT"
+            if [ "${TCG:-false}" = "true" ]; then
+              echo "bootable=true" >>"$GITHUB_OUTPUT"
+              echo "::warning::/dev/kvm is missing; falling back to CPU emulation, which is very slow"
+            else
+              echo "bootable=false" >>"$GITHUB_OUTPUT"
+              echo "::warning::/dev/kvm is missing on this runner; skipping the image build. Re-run with a KVM-capable runner label or set tcg=true."
+            fi
+          fi
+
+          # A Windows install plus the ISO plus the exported qcow2 needs room.
+          # The root volume is checked, and /mnt is preferred when the runner
+          # provides it because hosted images keep more free space there.
+          best=0
+          for mount in /mnt /; do
+            [ -d "$mount" ] || continue
+            avail=$(df --output=avail -k "$mount" | tail -1)
+            echo "$mount: $((avail / 1024 / 1024)) GiB free"
+            if [ "$avail" -gt "$best" ]; then best=$avail; work=$mount; fi
+          done
+          echo "work_mount=$work" >>"$GITHUB_OUTPUT"
+          if [ "$best" -lt $((45 * 1024 * 1024)) ]; then
+            echo "::error::the runner has at most $((best / 1024 / 1024)) GiB free; the build needs about 45 GiB"
+            exit 1
+          fi
+
+  build:
+    needs: probe
+    if: needs.probe.outputs.bootable == 'true'
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qemu-utils qemu-system-x86 ovmf swtpm \
+            p7zip-full wimtools curl ca-certificates python3
+          # Packer is small and its install is the only unpinned tool here.
+          PACKER_VERSION=1.11.2
+          curl --fail --silent --show-error --location \
+            "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_amd64.zip" \
+            --output /tmp/packer.zip
+          unzip -o -q /tmp/packer.zip -d /tmp/packer-bin
+          sudo install -m 0755 /tmp/packer-bin/packer /usr/local/bin/packer
+          export PACKER_GITHUB_API_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          packer version
+
+      # The ISO, the virtio media and the installers are several gigabytes and
+      # never change between runs, so they are the one thing worth caching.
+      - name: Cache the ISO and the installers
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ needs.probe.outputs.work_mount }}/windows-vm/iso
+            ${{ needs.probe.outputs.work_mount }}/windows-vm/installers
+          key: windows-vm-inputs-${{ hashFiles('.github/workflows/windows-image.yml') }}-${{ hashFiles('windows-vm/scripts/build-image.sh') }}
+
+      - name: Build the golden disk
+        id: disk
+        env:
+          ISO_URL: ${{ github.event.inputs.iso_url || env.DEFAULT_ISO_URL }}
+          ISO_SHA256: ${{ github.event.inputs.iso_sha256 }}
+          IMAGE_NAME: ${{ github.event.inputs.image_name || env.DEFAULT_IMAGE_NAME }}
+        run: |
+          work="${{ needs.probe.outputs.work_mount }}/windows-vm"
+          mkdir -p "$work"
+          echo "WORK_DIR=$work" >>"$GITHUB_ENV"
+          args=(--work-dir "$work" --iso-url "$ISO_URL" --image-name "$IMAGE_NAME"
+                --accelerator "${{ needs.probe.outputs.accelerator }}" --compress)
+          if [ -n "$ISO_SHA256" ]; then
+            args+=(--iso-sha256 "$ISO_SHA256")
+          fi
+          windows-vm/scripts/build-image.sh "${args[@]}" | tee "$work/build.log"
+
+      - name: Split the disk into registry-sized layers
+        run: |
+          windows-vm/scripts/make-oci-context.sh \
+            --disk "$WORK_DIR/disk.qcow2" \
+            --output-dir "$WORK_DIR/oci" \
+            --part-size 1800M
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the image
+        id: publish
+        # A pull request's token is read-only, and an unmerged branch should
+        # not push a long-lived image. The build still runs on a PR so the
+        # whole pipeline is exercised before it is merged.
+        if: github.event_name != 'pull_request'
+        run: |
+          stamp=$(date -u +%Y.%m.%d)
+          tag="${{ github.event.inputs.image_tag || 'ltsc2024' }}"
+          sha_tag="$tag-sha-${GITHUB_SHA::12}"
+          image="${IMAGE,,}"
+          docker build \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t "$image:$tag" -t "$image:$tag-$stamp" -t "$image:$sha_tag" \
+            "$WORK_DIR/oci"
+          docker push "$image:$tag"
+          docker push "$image:$tag-$stamp"
+          docker push "$image:$sha_tag"
+          echo "image=$image:$sha_tag" >>"$GITHUB_OUTPUT"
+          echo "### Windows LTSC image" >>"$GITHUB_STEP_SUMMARY"
+          echo "\`$image:$sha_tag\`" >>"$GITHUB_STEP_SUMMARY"
+          cat "$WORK_DIR/oci/manifest.json" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the build log and the manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-vm-manifest
+          path: |
+            ${{ needs.probe.outputs.work_mount }}/windows-vm/build.log
+            ${{ needs.probe.outputs.work_mount }}/windows-vm/oci/manifest.json
+          if-no-files-found: warn
