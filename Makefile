@@ -1,4 +1,4 @@
-IMAGE ?= ghcr.io/0x8000/system-image
+IMAGE ?= ghcr.io/0x8000/aarch64-apple-darwin
 TAG ?= macos-15.5
 PLATFORM ?= linux/amd64
 BUILD_DIR ?= .build

@@ -29,13 +29,13 @@ To use a local SDK mirror without changing the Dockerfile:
 make build BUILD_ARGS='--network host --build-arg MACOS_SDK_URL=http://127.0.0.1:18080/MacOSX15.5.sdk.tar.xz'
 ```
 
-The default image is `ghcr.io/0x8000/system-image:macos-15.5`.
+The default image is `ghcr.io/0x8000/aarch64-apple-darwin:macos-15.5`.
 
 ## Use from `cross`
 
 ```toml
 [target.aarch64-apple-darwin]
-image = "ghcr.io/0x8000/system-image:macos-15.5"
+image = "ghcr.io/0x8000/aarch64-apple-darwin:macos-15.5"
 pre-build = []
 ```
 
@@ -55,7 +55,7 @@ Keep the base image generic and derive a project image when additional tools are
 needed:
 
 ```dockerfile
-FROM ghcr.io/0x8000/system-image:macos-15.5
+FROM ghcr.io/0x8000/aarch64-apple-darwin:macos-15.5
 
 ARG XIDLC_VERSION=0.95.0
 RUN curl --fail --location \
@@ -72,7 +72,7 @@ other projects and the project-specific layer changes independently.
 The workflow validates every Dockerfile change. On pushes to `main` it publishes
 to GitHub Container Registry as:
 
-- `ghcr.io/0x8000/system-image:macos-15.5`
-- `ghcr.io/0x8000/system-image:sha-<commit>`
+- `ghcr.io/0x8000/aarch64-apple-darwin:macos-15.5`
+- `ghcr.io/0x8000/aarch64-apple-darwin:sha-<commit>`
 
 Publishing requires the repository to allow GitHub Actions to write packages.
