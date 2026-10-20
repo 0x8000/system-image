@@ -111,7 +111,6 @@ python3 "$ROOT/scripts/render-answer.py" \
   --output "$ROOT/packer/generated/cd/Autounattend.xml" \
   --image-name "$image_name" \
   --drivers "$driver_mode"
-cp "$ROOT/packer/scripts/00-enable-winrm.ps1" "$ROOT/packer/generated/cd/00-enable-winrm.ps1"
 
 echo "== fetching the installers" >&2
 fetch() {

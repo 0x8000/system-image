@@ -140,11 +140,12 @@ source "qemu" "windows_ltsc" {
   # Setup searches removable media for Autounattend.xml. It is placed on the
   # floppy and on the driver CD, because which media a UEFI machine enumerates
   # under A: is not stable; the same file on both costs nothing.
-  floppy_files = [local.answer_file, "${local.cd_root}/00-enable-winrm.ps1"]
+  floppy_files = [local.answer_file]
 
+  # The WinRM bootstrap is embedded in the answer file, so the only thing on
+  # the CD is the driver tree.
   cd_files = [
     local.answer_file,
-    "${local.cd_root}/00-enable-winrm.ps1",
     "${local.cd_root}/drivers",
   ]
   cd_label = "FASTNET"

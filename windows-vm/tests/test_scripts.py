@@ -122,6 +122,30 @@ class AnswerFileTest(unittest.TestCase):
             )
 
 
+    def test_winrm_bootstrap_is_embedded_not_read_from_a_drive(self) -> None:
+        # Setup reads the answer file from whichever removable medium it
+        # finds, so a bootstrap script referenced as A:\ only works when that
+        # happens to be the floppy. It must be embedded.
+        import base64
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "Autounattend.xml"
+            run(
+                sys.executable,
+                str(SCRIPTS / "render-answer.py"),
+                "--template",
+                str(TEMPLATE),
+                "--output",
+                str(output),
+            )
+            text = output.read_text()
+            self.assertNotIn("A:\\00-enable-winrm", text)
+            self.assertIn("-EncodedCommand ", text)
+            payload = text.split("-EncodedCommand ", 1)[1].split("<", 1)[0].strip()
+            script = base64.b64decode(payload).decode("utf-16-le")
+            self.assertIn("winrm set winrm/config/service", script)
+            self.assertIn("LocalAccountTokenFilterPolicy", script)
+
     def test_driver_component_precedes_setup(self) -> None:
         # Windows processes components in document order within a pass. If
         # Setup comes first it enumerates disks before the virtio drivers are

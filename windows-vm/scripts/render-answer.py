@@ -9,8 +9,12 @@ the ISO's install image, so the rendered file cannot disagree with the media.
 from __future__ import annotations
 
 import argparse
+import base64
 import sys
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+BOOTSTRAP = SCRIPT_DIR.parent / "packer" / "scripts" / "00-enable-winrm.ps1"
 
 # virtio-win keys Windows 11 as `w11`. The second CD-ROM's drive letter is not
 # stable across machines, so every plausible one is listed; setup ignores the
@@ -46,6 +50,18 @@ def driver_paths() -> str:
     return "\n".join(entries)
 
 
+def encoded_bootstrap() -> str:
+    """The WinRM bootstrap as a PowerShell -EncodedCommand payload.
+
+    Embedding the script removes the only drive letter the answer file would
+    otherwise depend on: setup reads Autounattend.xml from whichever removable
+    medium it finds, so drive A is not guaranteed to be the floppy that
+    carries the script.
+    """
+    text = BOOTSTRAP.read_text()
+    return base64.b64encode(text.encode("utf-16-le")).decode()
+
+
 def render(template: str, image_name: str, *, drivers: bool) -> str:
     """Fill the template.
 
@@ -53,12 +69,13 @@ def render(template: str, image_name: str, *, drivers: bool) -> str:
     path that does not exist on this machine. So the driver paths are only
     emitted when the build actually attaches a virtio disk.
     """
-    for placeholder in ("__IMAGE_NAME__", "__DRIVER_PATHS__"):
+    for placeholder in ("__IMAGE_NAME__", "__DRIVER_PATHS__", "__WINRM_BOOTSTRAP__"):
         if placeholder not in template:
             raise ValueError(f"the answer template has no {placeholder}")
     return (
         template.replace("__IMAGE_NAME__", image_name)
         .replace("__DRIVER_PATHS__", driver_paths() if drivers else "")
+        .replace("__WINRM_BOOTSTRAP__", encoded_bootstrap())
     )
 
 

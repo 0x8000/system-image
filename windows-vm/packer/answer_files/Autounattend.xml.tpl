@@ -182,7 +182,10 @@ __DRIVER_PATHS__
         <SynchronousCommand wcm:action="add">
           <Order>1</Order>
           <Description>Enable WinRM for Packer and the BDD harness</Description>
-          <CommandLine>cmd /c powershell -NoProfile -ExecutionPolicy Bypass -File A:\00-enable-winrm.ps1</CommandLine>
+          <!-- The script is embedded rather than read from a drive letter:
+               setup picks whichever removable medium holds this answer file,
+               so A: is not guaranteed to carry it. -->
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand __WINRM_BOOTSTRAP__</CommandLine>
         </SynchronousCommand>
       </FirstLogonCommands>
     </component>

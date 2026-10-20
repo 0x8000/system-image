@@ -128,7 +128,6 @@ jobs:
             --template answer_files/Autounattend.xml.tpl \
             --output generated/cd/Autounattend.xml \
             --drivers virtio
-          cp scripts/00-enable-winrm.ps1 generated/cd/
           # `packer init` downloads the plugin; `validate` type-checks the
           # template without booting anything.
           packer init .
