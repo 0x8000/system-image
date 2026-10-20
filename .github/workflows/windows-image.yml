@@ -184,24 +184,10 @@ jobs:
           # rather than repeated in every expression.
           TCG: ${{ github.event.inputs.tcg || 'false' }}
         run: |
-          # GitHub's hosted Linux runners expose /dev/kvm but leave it owned by
-          # the `kvm` group. The Android emulator documentation ships this exact
-          # udev rule for that; without it the device is present but unusable.
-          if [ ! -w /dev/kvm ] && [ -e /dev/kvm ]; then
-            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
-              sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
-            sudo udevadm control --reload-rules
-            sudo udevadm trigger --name-match=kvm
-          fi
-
-          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+          if windows-vm/scripts/enable-kvm.sh; then
             echo "accelerator=kvm" >>"$GITHUB_OUTPUT"
             echo "bootable=true" >>"$GITHUB_OUTPUT"
             echo "::notice::/dev/kvm is available; the image builds with hardware acceleration"
-            # Prove it accelerates rather than merely existing.
-            if command -v qemu-system-x86_64 >/dev/null; then
-              qemu-system-x86_64 --version | head -1
-            fi
           else
             echo "accelerator=tcg" >>"$GITHUB_OUTPUT"
             if [ "${TCG:-false}" = "true" ]; then
@@ -246,6 +232,10 @@ jobs:
           sudo install -m 0755 /tmp/packer-bin/packer /usr/local/bin/packer
           export PACKER_GITHUB_API_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           packer version
+
+      - name: Unlock KVM
+        if: needs.probe.outputs.accelerator == 'kvm'
+        run: windows-vm/scripts/enable-kvm.sh
 
       - name: Choose the build directory
         id: work
