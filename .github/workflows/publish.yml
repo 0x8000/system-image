@@ -1,0 +1,80 @@
+name: Publish image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - Makefile
+      - README.md
+      - scripts/**
+      - .github/workflows/publish.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - Makefile
+      - README.md
+      - scripts/**
+      - .github/workflows/publish.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:validation
+          cache-from: type=gha,scope=system-image
+          cache-to: type=gha,mode=max,scope=system-image
+      - name: Verify the toolchain
+        run: docker run --rm "$IMAGE_NAME:validation" /usr/local/bin/verify-image
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: metadata
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=macos-15.5
+            type=sha,prefix=sha-
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=system-image
+          cache-to: type=gha,mode=max,scope=system-image
