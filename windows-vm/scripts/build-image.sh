@@ -175,6 +175,9 @@ mkdir -p "$work/installers/agent"
 guest_agent="$work/installers/agent/qemu-ga-x86_64.msi"
 
 echo "== running packer" >&2
+# Packer's own log is the only place the full qemu command line appears when
+# the VM fails to start.
+export PACKER_LOG="${PACKER_LOG:-1}"
 # Packer refuses to build into a directory that already exists, so the output
 # path is cleared instead of created.
 outdir="$work/output"

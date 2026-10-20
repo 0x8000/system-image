@@ -151,7 +151,9 @@ source "qemu" "windows_ltsc" {
   winrm_use_ssl  = false
   winrm_insecure = true
 
-  qemuargs = [["-vga", "qxl"]]
+  # No qemuargs: setting it replaces Packer's whole default argument list
+  # (including the disk and NIC), which makes qemu fail to start. The image is
+  # headless, so the default display device is enough.
 }
 
 build {
