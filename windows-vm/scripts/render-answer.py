@@ -16,20 +16,31 @@ from pathlib import Path
 # stable across machines, so every plausible one is listed; setup ignores the
 # paths whose media is not mounted.
 DRIVES = ("D", "E", "F", "G", "H")
-DRIVER_DIRS = ("viostor", "vioscsi", "NetKvm", "Balloon", "vioserial", "qxldod")
-WINDOWS_DIR = "w11"
+DRIVER_TREES = (
+    ("viostor", "w11"),
+    ("vioscsi", "w11"),
+    ("NetKvm", "w11"),
+    ("Balloon", "w11"),
+    ("vioserial", "w11"),
+    ("Balloon", "w10"),
+    ("vioserial", "w10"),
+)
 
 
 def driver_paths() -> str:
     entries: list[str] = []
-    for order, (drive, directory) in enumerate(
-        ((drive, directory) for drive in DRIVES for directory in DRIVER_DIRS),
+    for order, (drive, directory, tree) in enumerate(
+        (
+            (drive, directory, tree)
+            for drive in DRIVES
+            for directory, tree in DRIVER_TREES
+        ),
         start=1,
     ):
         entries.append(
             "        <PathAndCredentials wcm:action=\"add\" "
             f'wcm:keyValue="{order}">\n'
-            f"          <Path>{drive}:\\drivers\\{directory}\\{WINDOWS_DIR}\\amd64</Path>\n"
+            f"          <Path>{drive}:\\drivers\\{directory}\\{tree}\\amd64</Path>\n"
             "        </PathAndCredentials>"
         )
     return "\n".join(entries)

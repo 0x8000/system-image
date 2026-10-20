@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Every virtio driver tree the answer file must point setup at.
-REQUIRED_DRIVERS = ("viostor", "vioscsi", "NetKvm", "Balloon", "vioserial", "qxldod")
+REQUIRED_DRIVERS = ("viostor", "vioscsi", "NetKvm")
 
 
 def values(root: ET.Element, suffix: str) -> list[str]:

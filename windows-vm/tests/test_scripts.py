@@ -88,7 +88,7 @@ class AnswerFileTest(unittest.TestCase):
             "/dev/stdout",
         ).stdout
         for drive in ("D:", "E:", "F:", "G:", "H:"):
-            self.assertIn(f"{drive}\\drivers\\viostor", rendered)
+            self.assertIn(f"{drive}\\drivers\\viostor\\w11\\amd64", rendered)
 
 
 class OciContextTest(unittest.TestCase):

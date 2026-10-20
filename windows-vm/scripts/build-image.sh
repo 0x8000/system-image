@@ -18,6 +18,7 @@ options:
   --iso-sha256 HEX        expected ISO hash; recorded but not required
   --image-name NAME       edition to install (default: LTSC 2024 Evaluation)
   --virtio-iso-url URL    virtio-win drivers ISO
+  --virtio-sha256 HEX     expected virtio-win hash
   --webview2-url URL      offline Evergreen WebView2 installer
   --npcap-url URL         Npcap installer
   --npcap-sha256 HEX      expected Npcap hash
@@ -35,9 +36,10 @@ USAGE
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 work=""
 iso_url="https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_LTSC_EVAL_x64FRE_en-us.iso"
-iso_sha=""
+iso_sha="67cec5865eaa037a72ddc633a717a10a2bed50778862267223ddb9c60ef5da68"
 image_name="Windows 11 Enterprise LTSC 2024 Evaluation"
 virtio_url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.285-1/virtio-win-0.1.285.iso"
+virtio_sha=""
 webview2_url="https://go.microsoft.com/fwlink/?linkid=2124701"
 npcap_url="https://npcap.com/dist/npcap-1.89.exe"
 npcap_sha=""
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --iso-sha256) iso_sha="${2,,}"; shift 2 ;;
     --image-name) image_name="$2"; shift 2 ;;
     --virtio-iso-url) virtio_url="$2"; shift 2 ;;
+    --virtio-sha256) virtio_sha="${2,,}"; shift 2 ;;
     --webview2-url) webview2_url="$2"; shift 2 ;;
     --npcap-url) npcap_url="$2"; shift 2 ;;
     --npcap-sha256) npcap_sha="${2,,}"; shift 2 ;;
@@ -116,30 +119,46 @@ fetch() {
   fi
   mv "$dest.tmp" "$dest"
 }
-fetch "$virtio_url" "$work/installers/virtio-win.iso"
+fetch "$virtio_url" "$work/installers/virtio-win.iso" "$virtio_sha"
 fetch "$webview2_url" "$work/installers/WebView2Setup.exe"
 fetch "$npcap_url" "$work/installers/npcap-installer.exe" "$npcap_sha"
 
 # Only the Windows 11 amd64 driver tree is staged: the other editions add
-# hundreds of megabytes to a medium setup reads during install.
+# hundreds of megabytes to a medium setup reads during install. The storage
+# and network drivers are required -- without them the disk is invisible or
+# the guest has no network -- while the rest only remove warnings.
+required_drivers=(viostor vioscsi NetKVM)
+optional_drivers=(Balloon vioserial)
+
 drivers="$ROOT/packer/generated/cd/drivers"
 rm -rf "$drivers"
 mkdir -p "$drivers"
 stage="$work/installers/drivers-stage"
 rm -rf "$stage"
 mkdir -p "$stage"
-for name in viostor vioscsi NetKvm Balloon vioserial qxldod; do
-  # The archive's root directory name changes between releases, so the tree
-  # is matched by suffix and copied out by its own name.
-  7z x -y -o"$stage" "$work/installers/virtio-win.iso" \
-    "*${name}/w11/amd64/*" >/dev/null
-  source_dir=$(find "$stage" -type d -path "*/${name}/w11/amd64" | head -n1)
-  if [[ -z "$source_dir" ]]; then
+
+stage_driver() {
+  local name=$1 tree=$2
+  7z x -y -o"$stage" "$work/installers/virtio-win.iso" "*${name}/${tree}/amd64/*" >/dev/null
+  local source_dir
+  source_dir=$(find "$stage" -type d -path "*/${name}/${tree}/amd64" | head -n1)
+  [[ -n "$source_dir" ]] || return 1
+  mkdir -p "$drivers/$name/$tree"
+  cp -a "$source_dir" "$drivers/$name/$tree/amd64"
+  return 0
+}
+
+for name in "${required_drivers[@]}"; do
+  if ! stage_driver "$name" w11; then
     echo "::error::virtio-win has no ${name}/w11/amd64 tree" >&2
     exit 1
   fi
-  mkdir -p "$drivers/$name/w11"
-  cp -a "$source_dir" "$drivers/$name/w11/amd64"
+done
+
+# qxldod and a few others ship w10 only; Windows 11 uses the same driver.
+for name in "${optional_drivers[@]}"; do
+  stage_driver "$name" w11 || stage_driver "$name" w10 ||
+    echo "::warning::virtio-win has no ${name} tree for Windows 11" >&2
 done
 rm -rf "$stage"
 

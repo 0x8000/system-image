@@ -20,7 +20,7 @@ on:
       iso_sha256:
         description: "Expected ISO sha256 (empty records the downloaded hash)"
         required: false
-        default: ""
+        default: "67cec5865eaa037a72ddc633a717a10a2bed50778862267223ddb9c60ef5da68"
       image_name:
         description: "Edition to install"
         required: false
