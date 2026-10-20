@@ -1,0 +1,5 @@
+# Packer's plugin cache and the rendered/derived build inputs.
+packer/generated/
+packer/packer_cache/
+packer/output*/
+.build/
