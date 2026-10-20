@@ -103,6 +103,12 @@ variable "shutdown_command" {
   default = "shutdown /s /t 5 /f"
 }
 
+variable "monitor_port" {
+  type        = number
+  description = "Local port for the QEMU monitor, used to capture the guest screen."
+  default     = 4444
+}
+
 locals {
   # The answer file and the virtio drivers share one small ISO. Setup finds
   # Autounattend.xml at the root of any removable drive, so the driver layout
@@ -150,8 +156,12 @@ source "qemu" "windows_ltsc" {
   ]
   cd_label = "FASTNET"
 
-  # Setup reads Autounattend.xml from removable media by itself.
-  boot_wait = "5s"
+  # Windows installation media stops at "Press any key to boot from CD or
+  # DVD..." and falls through to the empty disk if nothing is pressed, which
+  # looks exactly like a hang: no output, no WinRM, no error. Packer sends
+  # these keys over the VNC display it already exposes to the guest.
+  boot_wait    = "3s"
+  boot_command = ["<enter><wait3><enter><wait3><enter><wait3><enter><wait3><enter>"]
 
   communicator   = "winrm"
   winrm_username = "vagrant"
@@ -163,9 +173,11 @@ source "qemu" "windows_ltsc" {
   winrm_use_ssl  = false
   winrm_insecure = true
 
-  # No qemuargs: setting it replaces Packer's whole default argument list
-  # (including the disk and NIC), which makes qemu fail to start. The image is
-  # headless, so the default display device is enough.
+  # Packer merges qemuargs per flag, so flags it does not mention keep their
+  # defaults and the disk and NIC are unaffected. The monitor is what makes a
+  # hung install diagnosable: before WinRM answers, a screendump is the only
+  # signal the guest gives.
+  qemuargs = [["-monitor", "tcp:127.0.0.1:${var.monitor_port},server,nowait"]]
 }
 
 build {

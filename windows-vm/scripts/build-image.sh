@@ -182,6 +182,28 @@ mkdir -p "$work/installers/agent"
 guest_agent="$work/installers/agent/qemu-ga-x86_64.msi"
 
 echo "== running packer" >&2
+
+# A guest that never reaches WinRM is otherwise completely opaque, so the
+# build's screen is captured while packer waits. The images are kept on
+# failure and discarded on success.
+screens="$work/screens"
+rm -rf "$screens"
+mkdir -p "$screens"
+screen_watch_pid=""
+if command -v python3 >/dev/null; then
+  python3 "$ROOT/scripts/watch-screen.py" \
+    --port "${WINDOWS_MONITOR_PORT:-4444}" --output-dir "$screens" \
+    >"$screens/watch.log" 2>&1 &
+  screen_watch_pid=$!
+fi
+stop_screens() {
+  if [[ -n "$screen_watch_pid" ]]; then
+    kill "$screen_watch_pid" 2>/dev/null || true
+    wait "$screen_watch_pid" 2>/dev/null || true
+    screen_watch_pid=""
+  fi
+}
+trap stop_screens EXIT
 # Packer's own log is the only place the full qemu command line appears when
 # the VM fails to start.
 export PACKER_LOG="${PACKER_LOG:-1}"
@@ -192,6 +214,7 @@ rm -rf "$outdir"
 pushd "$ROOT/packer" >/dev/null
 packer init .
 packer build \
+  -var "monitor_port=${WINDOWS_MONITOR_PORT:-4444}" \
   -var "iso_url=$work/iso/windows.iso" \
   -var "iso_checksum=$(cat "$work/iso/checksum.txt")" \
   -var "guest_agent_msi=$guest_agent" \
