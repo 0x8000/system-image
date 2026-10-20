@@ -99,13 +99,18 @@ fi
 printf 'sha256:%s\n' "$actual_sha" >"$work/iso/checksum.txt"
 
 echo "== rendering the answer file" >&2
+# The driver paths and the driver CD must agree: setup treats a driver path
+# that is not on the media as a fatal error.
+driver_mode=none
+[[ "$disk_interface" == "virtio" ]] && driver_mode=virtio
 # The answer file, the WinRM bootstrap and the virtio drivers share one
 # CD-ROM. Setup reads Autounattend.xml from any removable media root, so a
 # single medium avoids a second drive letter that would shift between runs.
 python3 "$ROOT/scripts/render-answer.py" \
   --template "$ROOT/packer/answer_files/Autounattend.xml.tpl" \
   --output "$ROOT/packer/generated/cd/Autounattend.xml" \
-  --image-name "$image_name"
+  --image-name "$image_name" \
+  --drivers "$driver_mode"
 cp "$ROOT/packer/scripts/00-enable-winrm.ps1" "$ROOT/packer/generated/cd/00-enable-winrm.ps1"
 
 echo "== fetching the installers" >&2
@@ -123,44 +128,47 @@ fetch "$virtio_url" "$work/installers/virtio-win.iso" "$virtio_sha"
 fetch "$webview2_url" "$work/installers/WebView2Setup.exe"
 fetch "$npcap_url" "$work/installers/npcap-installer.exe" "$npcap_sha"
 
-# Only the Windows 11 amd64 driver tree is staged: the other editions add
-# hundreds of megabytes to a medium setup reads during install. The storage
-# and network drivers are required -- without them the disk is invisible or
-# the guest has no network -- while the rest only remove warnings.
-required_drivers=(viostor vioscsi NetKVM)
-optional_drivers=(Balloon vioserial)
-
+# Only a virtio disk needs drivers. A SATA build ships none: setup fails on a
+# driver path it cannot reach, and the extra tree only enlarges the medium.
 drivers="$ROOT/packer/generated/cd/drivers"
 rm -rf "$drivers"
-mkdir -p "$drivers"
-stage="$work/installers/drivers-stage"
-rm -rf "$stage"
-mkdir -p "$stage"
+if [[ "$driver_mode" == "virtio" ]]; then
+  # The storage and network drivers are required -- without them the disk is
+  # invisible or the guest has no network -- while the rest only remove
+  # warnings.
+  required_drivers=(viostor vioscsi NetKVM)
+  optional_drivers=(Balloon vioserial)
 
-stage_driver() {
-  local name=$1 tree=$2
-  7z x -y -o"$stage" "$work/installers/virtio-win.iso" "*${name}/${tree}/amd64/*" >/dev/null
-  local source_dir
-  source_dir=$(find "$stage" -type d -path "*/${name}/${tree}/amd64" | head -n1)
-  [[ -n "$source_dir" ]] || return 1
-  mkdir -p "$drivers/$name/$tree"
-  cp -a "$source_dir" "$drivers/$name/$tree/amd64"
-  return 0
-}
+  mkdir -p "$drivers"
+  stage="$work/installers/drivers-stage"
+  rm -rf "$stage"
+  mkdir -p "$stage"
 
-for name in "${required_drivers[@]}"; do
-  if ! stage_driver "$name" w11; then
-    echo "::error::virtio-win has no ${name}/w11/amd64 tree" >&2
-    exit 1
-  fi
-done
+  stage_driver() {
+    local name=$1 tree=$2
+    7z x -y -o"$stage" "$work/installers/virtio-win.iso" "*${name}/${tree}/amd64/*" >/dev/null
+    local source_dir
+    source_dir=$(find "$stage" -type d -path "*/${name}/${tree}/amd64" | head -n1)
+    [[ -n "$source_dir" ]] || return 1
+    mkdir -p "$drivers/$name/$tree"
+    cp -a "$source_dir" "$drivers/$name/$tree/amd64"
+    return 0
+  }
 
-# qxldod and a few others ship w10 only; Windows 11 uses the same driver.
-for name in "${optional_drivers[@]}"; do
-  stage_driver "$name" w11 || stage_driver "$name" w10 ||
-    echo "::warning::virtio-win has no ${name} tree for Windows 11" >&2
-done
-rm -rf "$stage"
+  for name in "${required_drivers[@]}"; do
+    if ! stage_driver "$name" w11; then
+      echo "::error::virtio-win has no ${name}/w11/amd64 tree" >&2
+      exit 1
+    fi
+  done
+
+  # A few components ship w10 only; Windows 11 uses the same driver.
+  for name in "${optional_drivers[@]}"; do
+    stage_driver "$name" w11 || stage_driver "$name" w10 ||
+      echo "::warning::virtio-win has no ${name} tree for Windows 11" >&2
+  done
+  rm -rf "$stage"
+fi
 
 # The guest agent ships on the same medium and is uploaded directly, so the
 # image does not need to keep the ISO mounted.

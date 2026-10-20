@@ -91,13 +91,17 @@ jobs:
           for edition in \
             "Windows 11 Enterprise LTSC 2024 Evaluation" \
             "Windows 11 IoT Enterprise LTSC Evaluation"; do
-            python3 windows-vm/scripts/render-answer.py \
-              --template windows-vm/packer/answer_files/Autounattend.xml.tpl \
-              --output /tmp/Autounattend.xml \
-              --image-name "$edition"
-            python3 windows-vm/scripts/check-answer.py \
-              --answer /tmp/Autounattend.xml \
-              --image-name "$edition"
+            for drivers in virtio none; do
+              python3 windows-vm/scripts/render-answer.py \
+                --template windows-vm/packer/answer_files/Autounattend.xml.tpl \
+                --output /tmp/Autounattend.xml \
+                --image-name "$edition" \
+                --drivers "$drivers"
+              python3 windows-vm/scripts/check-answer.py \
+                --answer /tmp/Autounattend.xml \
+                --image-name "$edition" \
+                --drivers "$drivers"
+            done
           done
 
       - name: Check the Packer template
@@ -122,7 +126,8 @@ jobs:
           : >/tmp/npcap.exe
           python3 ../scripts/render-answer.py \
             --template answer_files/Autounattend.xml.tpl \
-            --output generated/cd/Autounattend.xml
+            --output generated/cd/Autounattend.xml \
+            --drivers virtio
           cp scripts/00-enable-winrm.ps1 generated/cd/
           # `packer init` downloads the plugin; `validate` type-checks the
           # template without booting anything.

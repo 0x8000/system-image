@@ -39,6 +39,8 @@ class AnswerFileTest(unittest.TestCase):
                 str(output),
                 "--image-name",
                 edition,
+                "--drivers",
+                "virtio",
             )
             text = output.read_text()
             self.assertNotIn("__IMAGE_NAME__", text)
@@ -77,8 +79,8 @@ class AnswerFileTest(unittest.TestCase):
             self.assertIn("not selected", result.stderr)
 
     def test_driver_paths_survive_a_missing_drive_letter(self) -> None:
-        # Setup ignores paths whose media is not mounted, so the answer file
-        # has to list several candidates rather than one guessed letter.
+        # The driver CD's letter depends on the machine, so the answer file
+        # lists several candidates rather than one guess.
         rendered = run(
             sys.executable,
             str(SCRIPTS / "render-answer.py"),
@@ -86,9 +88,74 @@ class AnswerFileTest(unittest.TestCase):
             str(TEMPLATE),
             "--output",
             "/dev/stdout",
+            "--drivers",
+            "virtio",
         ).stdout
         for drive in ("D:", "E:", "F:", "G:", "H:"):
             self.assertIn(f"{drive}\\drivers\\viostor\\w11\\amd64", rendered)
+
+    def test_a_sata_build_has_no_driver_paths(self) -> None:
+        # A SATA disk needs no driver, and setup treats an unreachable driver
+        # path as fatal, so the paths must be absent rather than harmless.
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "Autounattend.xml"
+            run(
+                sys.executable,
+                str(SCRIPTS / "render-answer.py"),
+                "--template",
+                str(TEMPLATE),
+                "--output",
+                str(output),
+                "--drivers",
+                "none",
+            )
+            self.assertNotIn("PathAndCredentials", output.read_text())
+            run(
+                sys.executable,
+                str(SCRIPTS / "check-answer.py"),
+                "--answer",
+                str(output),
+                "--image-name",
+                "Windows 11 Enterprise LTSC 2024 Evaluation",
+                "--drivers",
+                "none",
+            )
+
+
+    def test_driver_component_precedes_setup(self) -> None:
+        # Windows processes components in document order within a pass. If
+        # Setup comes first it enumerates disks before the virtio drivers are
+        # loaded, sees nothing, and waits on an interactive error screen.
+        import xml.etree.ElementTree as ET
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "Autounattend.xml"
+            run(
+                sys.executable,
+                str(SCRIPTS / "render-answer.py"),
+                "--template",
+                str(TEMPLATE),
+                "--output",
+                str(output),
+                "--drivers",
+                "virtio",
+            )
+            root = ET.parse(output).getroot()
+            for pass_element in root:
+                if not pass_element.tag.endswith("settings"):
+                    continue
+                if pass_element.get("pass") != "windowsPE":
+                    continue
+                names = [
+                    component.get("name")
+                    for component in pass_element
+                    if component.tag.endswith("component")
+                ]
+                self.assertLess(
+                    names.index("Microsoft-Windows-PnpCustomizationsWinPE"),
+                    names.index("Microsoft-Windows-Setup"),
+                    "the driver component must be processed before Setup",
+                )
 
 
 class OciContextTest(unittest.TestCase):

@@ -71,13 +71,14 @@ variable "disk_size_mb" {
 
 variable "disk_interface" {
   type        = string
-  description = "virtio needs the injected viostor driver; sata is the fallback."
+  description = "virtio needs the injected viostor driver; sata needs none."
   default     = "virtio"
 }
 
 variable "net_device" {
-  type    = string
-  default = "virtio-net"
+  type        = string
+  description = "virtio-net needs NetKvm injected with the disk driver."
+  default     = "virtio-net"
 }
 
 variable "accelerator" {
@@ -136,9 +137,16 @@ source "qemu" "windows_ltsc" {
   # Setup always sees the virtual floppy at A:, which is the one location it
   # reliably looks for Autounattend.xml. The driver tree is too large for a
   # floppy, so it goes on a small CD-ROM instead.
+  # Setup searches removable media for Autounattend.xml. It is placed on the
+  # floppy and on the driver CD, because which media a UEFI machine enumerates
+  # under A: is not stable; the same file on both costs nothing.
   floppy_files = [local.answer_file, "${local.cd_root}/00-enable-winrm.ps1"]
 
-  cd_files = ["${local.cd_root}/drivers"]
+  cd_files = [
+    local.answer_file,
+    "${local.cd_root}/00-enable-winrm.ps1",
+    "${local.cd_root}/drivers",
+  ]
   cd_label = "FASTNET"
 
   # Setup reads Autounattend.xml from removable media by itself.
@@ -147,7 +155,10 @@ source "qemu" "windows_ltsc" {
   communicator   = "winrm"
   winrm_username = "vagrant"
   winrm_password = "vagrant"
-  winrm_timeout  = "90m"
+  # A correct unattended install reaches WinRM in about 10-20 minutes. A
+  # longer wait only hides a hung setup screen behind a long silence, so the
+  # build gives up while someone is still watching.
+  winrm_timeout  = "30m"
   winrm_use_ssl  = false
   winrm_insecure = true
 

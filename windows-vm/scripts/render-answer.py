@@ -46,13 +46,19 @@ def driver_paths() -> str:
     return "\n".join(entries)
 
 
-def render(template: str, image_name: str) -> str:
+def render(template: str, image_name: str, *, drivers: bool) -> str:
+    """Fill the template.
+
+    A SATA disk needs no driver at all, and Windows setup fails on a driver
+    path that does not exist on this machine. So the driver paths are only
+    emitted when the build actually attaches a virtio disk.
+    """
     for placeholder in ("__IMAGE_NAME__", "__DRIVER_PATHS__"):
         if placeholder not in template:
             raise ValueError(f"the answer template has no {placeholder}")
     return (
         template.replace("__IMAGE_NAME__", image_name)
-        .replace("__DRIVER_PATHS__", driver_paths())
+        .replace("__DRIVER_PATHS__", driver_paths() if drivers else "")
     )
 
 
@@ -64,10 +70,18 @@ def main() -> int:
         "--image-name",
         default="Windows 11 Enterprise LTSC 2024 Evaluation",
     )
+    parser.add_argument(
+        "--drivers",
+        choices=("virtio", "none"),
+        default="none",
+        help="emit virtio driver paths; a SATA disk needs none",
+    )
     args = parser.parse_args()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(render(args.template.read_text(), args.image_name))
+    args.output.write_text(
+        render(args.template.read_text(), args.image_name, drivers=args.drivers == "virtio")
+    )
     print(f"rendered {args.output} for {args.image_name!r}")
     return 0
 

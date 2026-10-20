@@ -21,7 +21,7 @@ def values(root: ET.Element, suffix: str) -> list[str]:
     return [element.text or "" for element in root.iter() if element.tag.endswith(suffix)]
 
 
-def check(path: Path, image_name: str) -> list[str]:
+def check(path: Path, image_name: str, *, drivers: bool = True) -> list[str]:
     problems: list[str] = []
     text = path.read_text()
     for placeholder in ("__IMAGE_NAME__", "__DRIVER_PATHS__"):
@@ -33,9 +33,16 @@ def check(path: Path, image_name: str) -> list[str]:
         problems.append(f"the edition {image_name!r} is not selected anywhere in the file")
 
     paths = [p for p in values(root, "Path") if p]
-    for driver in REQUIRED_DRIVERS:
-        if not any(driver in path for path in paths):
-            problems.append(f"no driver path for {driver}")
+    if drivers:
+        for driver in REQUIRED_DRIVERS:
+            if not any(driver in path for path in paths):
+                problems.append(f"no driver path for {driver}")
+    else:
+        unexpected = [p for p in paths if p.startswith(("D:", "E:", "F:", "G:", "H:"))]
+        # Setup treats an unreachable driver path as a fatal error, and a SATA
+        # build ships no driver tree, so the paths must not be there at all.
+        if unexpected:
+            problems.append(f"driver paths present without a driver CD: {unexpected[:3]}")
     return problems
 
 
@@ -43,9 +50,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--answer", type=Path, required=True)
     parser.add_argument("--image-name", required=True)
+    parser.add_argument(
+        "--drivers",
+        choices=("virtio", "none"),
+        default="virtio",
+    )
     args = parser.parse_args()
 
-    problems = check(args.answer, args.image_name)
+    problems = check(args.answer, args.image_name, drivers=args.drivers == "virtio")
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     if problems:

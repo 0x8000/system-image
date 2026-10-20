@@ -13,6 +13,16 @@
       <UserLocale>en-US</UserLocale>
     </component>
 
+    <!-- This component MUST precede Microsoft-Windows-Setup in this pass.
+         Windows processes components in document order, and the disk
+         configuration in Setup cannot see a virtio disk until these drivers
+         are loaded. The FASTNET CD-ROM's letter depends on the machine, so
+         every candidate is listed. -->
+    <component name="Microsoft-Windows-PnpCustomizationsWinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+      <DriverPaths>
+__DRIVER_PATHS__
+      </DriverPaths>
+    </component>
     <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
       <!-- The image is a disposable test device and has no TPM. Bypassing the
            checks is deliberate: adding a TPM to the build would make every
@@ -103,14 +113,6 @@
       </UserData>
     </component>
 
-    <!-- The FASTNET CD-ROM carries both this answer file and the virtio
-         drivers. Its drive letter depends on the machine, so every candidate
-         is listed and setup ignores the paths whose media is not mounted. -->
-    <component name="Microsoft-Windows-PnpCustomizationsWinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-      <DriverPaths>
-__DRIVER_PATHS__
-      </DriverPaths>
-    </component>
   </settings>
 
   <settings pass="offlineServicing">
