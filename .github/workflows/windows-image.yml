@@ -75,6 +75,11 @@ jobs:
         run: |
           shellcheck windows-vm/scripts/*.sh
           for script in windows-vm/scripts/*.sh; do bash -n "$script"; done
+          # The helper must not print a path this runner cannot actually write.
+          dir=$(windows-vm/scripts/choose-work-dir.sh 1 lint-probe)
+          test -w "$dir"
+          touch "$dir/probe"
+          test -f "$dir/probe"
 
       - name: Python unit tests
         run: python3 -m unittest discover -s windows-vm/tests -v
@@ -169,7 +174,6 @@ jobs:
     outputs:
       accelerator: ${{ steps.kvm.outputs.accelerator }}
       bootable: ${{ steps.kvm.outputs.bootable }}
-      work_root: ${{ steps.kvm.outputs.work_root }}
     steps:
       - id: kvm
         env:
@@ -207,25 +211,14 @@ jobs:
           fi
 
           # A Windows install plus the ISO plus the exported qcow2 needs room.
-          # The root volume is checked, and /mnt is preferred when the runner
-          # provides it because hosted images keep more free space there.
-          # Hosted images give /mnt far more space than the root volume but
-          # keep it root-owned. The build job runs on a different machine, so
-          # only the mount is reported here; that job prepares its own path.
-          best=0
-          work=""
-          for mount in /mnt /; do
-            [ -d "$mount" ] && [ -w "$mount" ] || continue
-            avail=$(df --output=avail -k "$mount" | tail -1)
-            echo "$mount: $((avail / 1024 / 1024)) GiB free"
-            if [ "$avail" -gt "$best" ]; then best=$avail; work="$mount"; fi
-          done
-          [ -n "$work" ] || { echo "::error::no writable mount to build on"; exit 1; }
-          echo "work_root=$work" >>"$GITHUB_OUTPUT"
-          if [ "$best" -lt $((45 * 1024 * 1024)) ]; then
-            echo "::error::the runner has at most $((best / 1024 / 1024)) GiB free; the build needs about 45 GiB"
+          # The helper creates a writable directory under a candidate mount and
+          # prints the free space, which is what decides whether a build here
+          # is worth starting.
+          if ! work=$(windows-vm/scripts/choose-work-dir.sh 45 windows-vm); then
+            echo "::error::no writable directory with 45 GiB free on this runner"
             exit 1
           fi
+          echo "::notice::build work directory would be $work"
 
   build:
     needs: probe
@@ -251,14 +244,21 @@ jobs:
           export PACKER_GITHUB_API_TOKEN="${{ secrets.GITHUB_TOKEN }}"
           packer version
 
+      - name: Choose the build directory
+        id: work
+        run: |
+          work=$(windows-vm/scripts/choose-work-dir.sh 45 windows-vm)
+          echo "dir=$work" >>"$GITHUB_OUTPUT"
+          echo "WORK_DIR=$work" >>"$GITHUB_ENV"
+
       # The ISO, the virtio media and the installers are several gigabytes and
       # never change between runs, so they are the one thing worth caching.
       - name: Cache the ISO and the installers
         uses: actions/cache@v4
         with:
-          path: |
-            ${{ needs.probe.outputs.work_root }}/windows-vm/iso
-            ${{ needs.probe.outputs.work_root }}/windows-vm/installers
+          # Only the build directory that will be used is listed, so the cache
+          # action never fails on a path this runner does not have.
+          path: ${{ steps.work.outputs.dir }}/iso
           key: windows-vm-inputs-${{ hashFiles('.github/workflows/windows-image.yml') }}-${{ hashFiles('windows-vm/scripts/build-image.sh') }}
 
       - name: Build the golden disk
@@ -268,21 +268,12 @@ jobs:
           ISO_SHA256: ${{ github.event.inputs.iso_sha256 }}
           IMAGE_NAME: ${{ github.event.inputs.image_name || env.DEFAULT_IMAGE_NAME }}
         run: |
-          root="${{ needs.probe.outputs.work_root }}"
-          work="$root/windows-vm"
-          if [ "$root" = "/" ]; then
-            mkdir -p "$work"
-          else
-            sudo mkdir -p "$work"
-            sudo chown "$(id -u):$(id -g)" "$work"
-          fi
-          echo "WORK_DIR=$work" >>"$GITHUB_ENV"
-          args=(--work-dir "$work" --iso-url "$ISO_URL" --image-name "$IMAGE_NAME"
+          args=(--work-dir "$WORK_DIR" --iso-url "$ISO_URL" --image-name "$IMAGE_NAME"
                 --accelerator "${{ needs.probe.outputs.accelerator }}" --compress)
           if [ -n "$ISO_SHA256" ]; then
             args+=(--iso-sha256 "$ISO_SHA256")
           fi
-          windows-vm/scripts/build-image.sh "${args[@]}" | tee "$work/build.log"
+          windows-vm/scripts/build-image.sh "${args[@]}" | tee "$WORK_DIR/build.log"
 
       - name: Split the disk into registry-sized layers
         run: |
@@ -328,6 +319,6 @@ jobs:
         with:
           name: windows-vm-manifest
           path: |
-            ${{ needs.probe.outputs.work_root }}/windows-vm/build.log
-            ${{ needs.probe.outputs.work_root }}/windows-vm/oci/manifest.json
+            ${{ steps.work.outputs.dir }}/build.log
+            ${{ steps.work.outputs.dir }}/oci/manifest.json
           if-no-files-found: warn
