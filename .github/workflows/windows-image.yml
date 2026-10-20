@@ -133,7 +133,10 @@ jobs:
       - name: Exercise the OCI splitter and reassembler
         run: |
           mkdir -p /tmp/probe
-          qemu-img create -f qcow2 /tmp/probe/disk.qcow2 64M >/dev/null
+          # A freshly created qcow2 holds metadata only, so it would split
+          # into a single part regardless of the part size.
+          head -c 16777216 /dev/urandom >/tmp/probe/payload
+          qemu-img convert -O qcow2 /tmp/probe/payload /tmp/probe/disk.qcow2
           windows-vm/scripts/make-oci-context.sh \
             --disk /tmp/probe/disk.qcow2 \
             --output-dir /tmp/probe/ctx \
@@ -166,7 +169,7 @@ jobs:
     outputs:
       accelerator: ${{ steps.kvm.outputs.accelerator }}
       bootable: ${{ steps.kvm.outputs.bootable }}
-      work_mount: ${{ steps.kvm.outputs.work_mount }}
+      work_root: ${{ steps.kvm.outputs.work_root }}
     steps:
       - id: kvm
         env:
@@ -206,14 +209,19 @@ jobs:
           # A Windows install plus the ISO plus the exported qcow2 needs room.
           # The root volume is checked, and /mnt is preferred when the runner
           # provides it because hosted images keep more free space there.
+          # Hosted images give /mnt far more space than the root volume but
+          # keep it root-owned. The build job runs on a different machine, so
+          # only the mount is reported here; that job prepares its own path.
           best=0
+          work=""
           for mount in /mnt /; do
-            [ -d "$mount" ] || continue
+            [ -d "$mount" ] && [ -w "$mount" ] || continue
             avail=$(df --output=avail -k "$mount" | tail -1)
             echo "$mount: $((avail / 1024 / 1024)) GiB free"
-            if [ "$avail" -gt "$best" ]; then best=$avail; work=$mount; fi
+            if [ "$avail" -gt "$best" ]; then best=$avail; work="$mount"; fi
           done
-          echo "work_mount=$work" >>"$GITHUB_OUTPUT"
+          [ -n "$work" ] || { echo "::error::no writable mount to build on"; exit 1; }
+          echo "work_root=$work" >>"$GITHUB_OUTPUT"
           if [ "$best" -lt $((45 * 1024 * 1024)) ]; then
             echo "::error::the runner has at most $((best / 1024 / 1024)) GiB free; the build needs about 45 GiB"
             exit 1
@@ -249,8 +257,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ${{ needs.probe.outputs.work_mount }}/windows-vm/iso
-            ${{ needs.probe.outputs.work_mount }}/windows-vm/installers
+            ${{ needs.probe.outputs.work_root }}/windows-vm/iso
+            ${{ needs.probe.outputs.work_root }}/windows-vm/installers
           key: windows-vm-inputs-${{ hashFiles('.github/workflows/windows-image.yml') }}-${{ hashFiles('windows-vm/scripts/build-image.sh') }}
 
       - name: Build the golden disk
@@ -260,8 +268,14 @@ jobs:
           ISO_SHA256: ${{ github.event.inputs.iso_sha256 }}
           IMAGE_NAME: ${{ github.event.inputs.image_name || env.DEFAULT_IMAGE_NAME }}
         run: |
-          work="${{ needs.probe.outputs.work_mount }}/windows-vm"
-          mkdir -p "$work"
+          root="${{ needs.probe.outputs.work_root }}"
+          work="$root/windows-vm"
+          if [ "$root" = "/" ]; then
+            mkdir -p "$work"
+          else
+            sudo mkdir -p "$work"
+            sudo chown "$(id -u):$(id -g)" "$work"
+          fi
           echo "WORK_DIR=$work" >>"$GITHUB_ENV"
           args=(--work-dir "$work" --iso-url "$ISO_URL" --image-name "$IMAGE_NAME"
                 --accelerator "${{ needs.probe.outputs.accelerator }}" --compress)
@@ -314,6 +328,6 @@ jobs:
         with:
           name: windows-vm-manifest
           path: |
-            ${{ needs.probe.outputs.work_mount }}/windows-vm/build.log
-            ${{ needs.probe.outputs.work_mount }}/windows-vm/oci/manifest.json
+            ${{ needs.probe.outputs.work_root }}/windows-vm/build.log
+            ${{ needs.probe.outputs.work_root }}/windows-vm/oci/manifest.json
           if-no-files-found: warn
