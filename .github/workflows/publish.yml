@@ -5,19 +5,23 @@ on:
     branches:
       - main
     paths:
-      - Dockerfile
       - Makefile
       - README.md
-      - scripts/**
+      - macos/**
       - .github/workflows/publish.yml
   pull_request:
     paths:
-      - Dockerfile
       - Makefile
       - README.md
-      - scripts/**
+      - macos/**
       - .github/workflows/publish.yml
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version to build (e.g. all, macos-15.5, macos-26.1)'
+        required: false
+        default: 'all'
+        type: string
 
 permissions:
   contents: read
@@ -27,33 +31,106 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/aarch64-apple-darwin
-
 jobs:
-  validate:
+  prepare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+
+          all_targets = [
+            {
+              "name": "macos-15.5",
+              "dockerfile": "macos/Dockerfile",
+              "image": "ghcr.io/${{ github.repository_owner }}/aarch64-apple-darwin",
+              "tag": "macos-15.5",
+              "build_args": "MACOS_SDK_VERSION=15.5",
+              "cache_scope": "system-image-macos-15.5"
+            },
+            {
+              "name": "macos-26.1",
+              "dockerfile": "macos/Dockerfile",
+              "image": "ghcr.io/${{ github.repository_owner }}/aarch64-apple-darwin",
+              "tag": "macos-26.1",
+              "build_args": "MACOS_SDK_VERSION=26.1",
+              "cache_scope": "system-image-macos-26.1"
+            }
+          ]
+
+          raw_input = os.environ.get("INPUT_VERSION", "").strip().lower()
+          if not raw_input or raw_input == "all":
+              selected = all_targets
+          else:
+              parts = [p.strip() for p in raw_input.split(",") if p.strip()]
+              selected = []
+              for item in all_targets:
+                  name = item["name"].lower()
+                  tag = item["tag"].lower()
+                  match = False
+                  for p in parts:
+                      if p in (name, tag):
+                          match = True
+                      elif p == "macos" and name.startswith("macos"):
+                          match = True
+                      elif p == "15.5" and tag == "macos-15.5":
+                          match = True
+                      elif p == "26.1" and tag == "macos-26.1":
+                          match = True
+                  if match and item not in selected:
+                      selected.append(item)
+
+          if not selected:
+              sys.stderr.write(f"Error: No matching targets found for input version: {raw_input}\n")
+              sys.stderr.write("Available targets: all, macos-15.5 (15.5), macos-26.1 (26.1)\n")
+              sys.exit(1)
+
+          matrix_json = json.dumps({"include": selected})
+          gh_output = os.environ.get("GITHUB_OUTPUT")
+          if gh_output:
+              with open(gh_output, "a") as f:
+                  f.write(f"matrix={matrix_json}\n")
+          else:
+              print(f"matrix={matrix_json}")
+          EOF
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+
+  validate:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Build the image
+      - name: Build the ${{ matrix.name }} image
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
+          build-args: ${{ matrix.build_args }}
           load: true
-          tags: ${{ env.IMAGE_NAME }}:validation
-          cache-from: type=gha,scope=system-image
-          cache-to: type=gha,mode=max,scope=system-image
-      - name: Verify the toolchain
-        run: docker run --rm "$IMAGE_NAME:validation" /usr/local/bin/verify-image
+          tags: ${{ matrix.image }}:validation-${{ matrix.tag }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
+      - name: Verify the ${{ matrix.name }} toolchain
+        run: docker run --rm "${{ matrix.image }}:validation-${{ matrix.tag }}" /usr/local/bin/verify-image
 
   publish:
     if: github.event_name != 'pull_request'
-    needs: validate
+    needs: [prepare, validate]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -65,16 +142,19 @@ jobs:
       - uses: docker/metadata-action@v5
         id: metadata
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ${{ matrix.image }}
           tags: |
-            type=raw,value=macos-15.5
-            type=sha,prefix=sha-
-      - uses: docker/build-push-action@v6
+            type=raw,value=${{ matrix.tag }}
+            type=sha,prefix=${{ matrix.tag }}-sha-
+      - name: Build and publish the ${{ matrix.name }} image
+        uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
+          build-args: ${{ matrix.build_args }}
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha,scope=system-image
-          cache-to: type=gha,mode=max,scope=system-image
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}

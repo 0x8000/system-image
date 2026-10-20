@@ -1,10 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-expected_sdk=/opt/osxcross/SDK/MacOSX15.5.sdk
-expected_target=darwin24.5
-expected_sdk_version=15.5
-expected_minos=11.0
+conf="$(osxcross-conf)"
+target_dir="$(sed -n 's/^export OSXCROSS_TARGET_DIR="\(.*\)"$/\1/p' <<<"$conf")"
+sdk_dir="$(sed -n 's/^export OSXCROSS_SDK="\(.*\)"$/\1/p' <<<"$conf")"
+sdk_version="$(sed -n 's/^export OSXCROSS_SDK_VERSION="\(.*\)"$/\1/p' <<<"$conf")"
+osx_target="$(sed -n 's/^export OSXCROSS_TARGET="\(.*\)"$/\1/p' <<<"$conf")"
+osx_min="$(sed -n 's/^export OSXCROSS_OSX_VERSION_MIN="\(.*\)"$/\1/p' <<<"$conf")"
+osx_flavor="$(sed -n 's/^export OSXCROSS_BUILD_FLAVOR="\(.*\)"$/\1/p' <<<"$conf")"
+
+expected_sdk_version="${OSXCROSS_SDK_VERSION:-15.5}"
+case "$expected_sdk_version" in
+  15.5)
+    expected_target=darwin24.5
+    ;;
+  26.1)
+    expected_target=darwin25.1
+    ;;
+  *)
+    echo "Unsupported or unconfigured SDK version for verification: $expected_sdk_version" >&2
+    exit 1
+    ;;
+esac
+
+expected_sdk="/opt/osxcross/SDK/MacOSX${expected_sdk_version}.sdk"
+expected_minos="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 target=aarch64-apple-darwin
 suffix=aarch64_apple_darwin
 upper=AARCH64_APPLE_DARWIN
@@ -13,14 +33,6 @@ cc_name="${tool_suffix}-clang"
 cxx_name="${tool_suffix}-clang++"
 ar_name="${tool_suffix}-ar"
 otool_name="${tool_suffix}-otool"
-
-conf="$(osxcross-conf)"
-target_dir="$(sed -n 's/^export OSXCROSS_TARGET_DIR="\(.*\)"$/\1/p' <<<"$conf")"
-sdk_dir="$(sed -n 's/^export OSXCROSS_SDK="\(.*\)"$/\1/p' <<<"$conf")"
-sdk_version="$(sed -n 's/^export OSXCROSS_SDK_VERSION="\(.*\)"$/\1/p' <<<"$conf")"
-osx_target="$(sed -n 's/^export OSXCROSS_TARGET="\(.*\)"$/\1/p' <<<"$conf")"
-osx_min="$(sed -n 's/^export OSXCROSS_OSX_VERSION_MIN="\(.*\)"$/\1/p' <<<"$conf")"
-osx_flavor="$(sed -n 's/^export OSXCROSS_BUILD_FLAVOR="\(.*\)"$/\1/p' <<<"$conf")"
 
 test "$osx_target" = "$expected_target"
 test "$sdk_version" = "$expected_sdk_version"

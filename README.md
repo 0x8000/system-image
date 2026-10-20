@@ -15,18 +15,39 @@ It intentionally does not contain project-specific tools such as `xidlc`,
 `protoc`, or a database client library. Projects can derive from this image and
 add those tools in their own repository.
 
+## Images
+
+| Target | Image | Tag |
+| --- | --- | --- |
+| `aarch64-apple-darwin` | `ghcr.io/0x8000/aarch64-apple-darwin` | `macos-15.5` |
+| `aarch64-apple-darwin` | `ghcr.io/0x8000/aarch64-apple-darwin` | `macos-26.1` |
+
 ## Local build
 
 ```sh
+# Build default macOS image (macos-15.5)
 make build
 make verify
 make smoke
+
+# Build macOS 15.5 image explicitly
+make macos-15-build
+make macos-15-verify
+make macos-15-smoke
+
+# Build macOS 26.1 image
+make macos-26-build
+make macos-26-verify
+make macos-26-smoke
 ```
+
+Run both verification suites with `make verify-all`.
 
 To use a local SDK mirror without changing the Dockerfile:
 
 ```sh
 make build BUILD_ARGS='--network host --build-arg MACOS_SDK_URL=http://127.0.0.1:18080/MacOSX15.5.sdk.tar.xz'
+make macos-26-build BUILD_ARGS='--network host --build-arg MACOS_SDK_URL=http://127.0.0.1:18080/MacOSX26.1.sdk.tar.xz'
 ```
 
 The default image is `ghcr.io/0x8000/aarch64-apple-darwin:macos-15.5`.
@@ -69,10 +90,15 @@ other projects and the project-specific layer changes independently.
 
 ## Publishing
 
-The workflow validates every Dockerfile change. On pushes to `main` it publishes
-to GitHub Container Registry as:
+The workflow validates every image change. On pushes to `main` it publishes to
+GitHub Container Registry as:
 
 - `ghcr.io/0x8000/aarch64-apple-darwin:macos-15.5`
-- `ghcr.io/0x8000/aarch64-apple-darwin:sha-<commit>`
+- `ghcr.io/0x8000/aarch64-apple-darwin:macos-15.5-sha-<commit>`
+- `ghcr.io/0x8000/aarch64-apple-darwin:macos-26.1`
+- `ghcr.io/0x8000/aarch64-apple-darwin:macos-26.1-sha-<commit>`
+
+You can also manually trigger the `Publish image` workflow via `workflow_dispatch`
+and specify which image version to build (e.g. `all`, `macos-15.5`, or `macos-26.1`).
 
 Publishing requires the repository to allow GitHub Actions to write packages.
