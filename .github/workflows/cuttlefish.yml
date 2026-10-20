@@ -198,7 +198,11 @@ jobs:
           mv "$dir"/cuttlefish-base_*_amd64.deb "$dir"/cuttlefish-user_*_amd64.deb \
             "$RUNNER_TEMP/debs/"
           base_deb="$(find "$RUNNER_TEMP/debs" -name 'cuttlefish-base_*_amd64.deb')"
-          dpkg-deb -c "$base_deb" | grep -q 'usr/lib/cuttlefish-common/bin/cvd$' \
+          # Keep dpkg-deb's output out of a pipe: grep -q exits after the first
+          # match, which makes tar fail with SIGPIPE under pipefail even when
+          # the package contains cvd.
+          dpkg-deb -c "$base_deb" > "$RUNNER_TEMP/deb-contents.txt"
+          grep -q 'usr/lib/cuttlefish-common/bin/cvd$' "$RUNNER_TEMP/deb-contents.txt" \
             || { echo "cvd missing from $base_deb" >&2; exit 1; }
           version="$(dpkg-deb -f "$base_deb" Version)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
