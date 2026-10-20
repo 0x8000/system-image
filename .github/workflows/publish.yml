@@ -1,22 +1,6 @@
 name: Publish image
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - Makefile
-      - README.md
-      - macos/**
-      - windows/**
-      - .github/workflows/publish.yml
-  pull_request:
-    paths:
-      - Makefile
-      - README.md
-      - macos/**
-      - windows/**
-      - .github/workflows/publish.yml
   workflow_dispatch:
     inputs:
       version:
