@@ -133,6 +133,32 @@ RUN curl --fail --location \
 Then point `Cross.toml` at the derived image. The base image remains reusable by
 other projects and the project-specific layer changes independently.
 
+## Cuttlefish portable bundle
+
+`cuttlefish/` builds and ships the [google/android-cuttlefish](https://github.com/google/android-cuttlefish)
+virtual Android stack as a single self-contained download for Linux hosts. The
+bundle is a Debian 13 rootfs with the upstream `cuttlefish-base` and
+`cuttlefish-user` packages (`cvd`, `crosvm`, the orchestrator, and every runtime
+dependency) plus a `cvd` wrapper that runs the whole stack inside the rootfs and
+performs the required host setup (kernel modules, udev rules, `cvd-ebr`/`cvd-wbr`
+bridges, DHCP; re-executing via `sudo` when needed). Nothing is installed on the
+host by extraction alone; instance disks, logs, and `~/.cvd` stay in `$HOME`.
+
+- `cuttlefish/cvd` — the wrapper that runs everything inside `rootfs/`
+- `cuttlefish/build-bundle.sh` — assembles the rootfs (debootstrap + debs) and
+  produces `cuttlefish-<version>-x86_64.tar.zst` and a self-extracting `.run`
+- `cuttlefish/BUNDLE_README.md` — user guide shipped inside every bundle
+- `.github/workflows/cuttlefish.yml` — CI: builds upstream debs in its own build
+  container, packs the bundle in a `debian:13` container, and publishes a GitHub
+  release tagged `cuttlefish-<ref>`; weekly cron picks up new upstream tags and
+  skips existing releases, or run it manually with `workflow_dispatch`
+
+Why not AppImage or Docker? AppImage cannot represent this workload: the stack
+is dozens of cooperating processes calling each other by absolute paths, needs
+file capabilities that squashfs/FUSE does not carry, and must configure host
+network state regardless of the packaging format. A plain rootfs + wrapper
+needs no extra dependencies and stays out of the way of `sudo` access.
+
 ## Publishing
 
 The workflow validates every image change. On pushes to `main` it publishes to

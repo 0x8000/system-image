@@ -1,0 +1,431 @@
+#!/usr/bin/env bash
+#
+# Wrapper for the portable Cuttlefish bundle.
+#
+# The bundle contains a Debian rootfs with the Cuttlefish host tools and all of
+# their runtime dependencies. This script enters that rootfs with a private
+# mount namespace, exposes the host devices and the invoking user's home
+# directory, and runs the bundled `cvd` command as the invoking user.
+#
+# The wrapper needs root because Cuttlefish needs to create bridges, tap
+# devices, nftables rules and a DHCP server in the host network namespace. It
+# re-executes itself through sudo automatically.
+
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+BUNDLE_DIR="$(cd "$(dirname "$SELF")" && pwd -P)"
+ROOTFS="${CUTTLEFISH_BUNDLE_ROOT:-${BUNDLE_DIR}/rootfs}"
+CVD_BIN="/usr/lib/cuttlefish-common/bin/cvd"
+
+log() { printf 'cuttlefish: %s\n' "$*" >&2; }
+warn() { printf 'cuttlefish: warning: %s\n' "$*" >&2; }
+die() { printf 'cuttlefish: error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Portable Cuttlefish bundle.
+
+Usage:
+  ./cvd [cvd arguments...]     Run the bundled cvd command
+  ./cvd --setup                Configure host groups, modules, udev and networking
+  ./cvd --teardown             Remove the host networking resources
+  ./cvd --shell                Open a shell inside the bundle rootfs
+  ./cvd --bundle-info          Show bundle version and paths
+  ./cvd --bundle-help          Show this help
+
+Examples:
+  ./cvd fetch --default_build=aosp-android-latest-release/aosp_cf_x86_64_only_phone-userdebug
+  ./cvd create
+  ./cvd status
+  ./cvd stop
+
+The wrapper runs as root through sudo. Host setup is performed automatically
+before the first cvd command, so `./cvd --setup` is optional.
+
+Environment:
+  CUTTLEFISH_BUNDLE_SUDO=0     Do not re-exec through sudo (must already be root)
+  CUTTLEFISH_BUNDLE_NO_SETUP=1 Do not configure host resources automatically
+  CUTTLEFISH_BUNDLE_ROOT=DIR   Use a different rootfs directory
+EOF
+}
+
+bundle_info() {
+  printf 'bundle:  %s\n' "$BUNDLE_DIR"
+  printf 'rootfs:  %s\n' "$ROOTFS"
+  printf 'version: %s\n' "$(head -n1 "$BUNDLE_DIR/VERSION" 2>/dev/null || echo unknown)"
+  printf 'arch:    %s\n' "$(cat "$BUNDLE_DIR/ARCH" 2>/dev/null || echo unknown)"
+  sed -n 's/^ref: /ref:    /p; s/^commit: /commit: /p; s/^built: /built:  /p' \
+    "$BUNDLE_DIR/VERSION" 2>/dev/null || true
+}
+
+# Paths we are willing to bind into the chroot. Binding arbitrary directories
+# such as /usr or /etc would hide the rootfs. Paths under $HOME are always
+# covered by the home bind.
+path_is_bindable() {
+  case "$1" in
+    /home|/home/*|/root|/root/*|/tmp|/tmp/*|/var/tmp|/var/tmp/*|\
+    /mnt|/mnt/*|/media|/media/*|/srv|/srv/*|/opt|/opt/*|/data|/data/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# This branch runs inside the new mount namespace, after unshare(1).
+if [ "${1:-}" = "__enter" ]; then
+  shift
+
+  mode="${CUTTLEFISH_ENTER_MODE:?}"
+  rootfs="${CUTTLEFISH_BUNDLE_ROOTFS:?}"
+  run_uid="${CUTTLEFISH_RUN_UID:?}"
+  run_gid="${CUTTLEFISH_RUN_GID:?}"
+  run_user="${CUTTLEFISH_RUN_USER:?}"
+  run_home="${CUTTLEFISH_RUN_HOME:?}"
+  run_groups="${CUTTLEFISH_RUN_GROUPS:-}"
+
+  [ "$(id -u)" -eq 0 ] || die "internal error: mount namespace entry is not root"
+  [ -d "$rootfs" ] || die "rootfs not found: $rootfs"
+
+  mkdir -p "$rootfs/dev" "$rootfs/sys" "$rootfs/proc"
+
+  # Devices, sysfs and procfs come from the host. Without /dev/kvm there is no
+  # point in continuing, so let cvd report that with its own diagnostics.
+  mount --rbind /dev "$rootfs/dev"
+  mount --make-rslave "$rootfs/dev"
+  mount --rbind /sys "$rootfs/sys"
+  mount --make-rslave "$rootfs/sys"
+  mount -t proc proc "$rootfs/proc"
+
+  home="$run_home"
+  if [ -n "$home" ] && [ "$home" != "/" ] && [ -d "$home" ]; then
+    mkdir -p "$rootfs$home"
+    mount --bind "$home" "$rootfs$home"
+  fi
+
+  workdir="/"
+  if [ "$PWD" != "/" ]; then
+    if { [ -n "$home" ] && [ "$home" != "/" ] && \
+         { [ "$PWD" = "$home" ] || [[ "$PWD" == "$home"/* ]]; }; }; then
+      # Covered by the home bind above.
+      workdir="$PWD"
+    elif path_is_bindable "$PWD"; then
+      mkdir -p "$rootfs$PWD"
+      mount --bind "$PWD" "$rootfs$PWD"
+      workdir="$PWD"
+    else
+      warn "current directory $PWD is not exposed inside the bundle; using $home"
+    fi
+  fi
+  if [ "$workdir" = "/" ] && [ -n "$home" ] && [ "$home" != "/" ] && [ -d "$home" ]; then
+    workdir="$home"
+  fi
+
+  # Use the host resolver so `cvd fetch` works with the host's DNS setup.
+  if [ -r /etc/resolv.conf ]; then
+    rm -f "$rootfs/etc/resolv.conf"
+    cp /etc/resolv.conf "$rootfs/etc/resolv.conf" 2>/dev/null || \
+      warn "could not update the resolver configuration in the rootfs"
+  fi
+
+  # cvd must be started from a path ending in cuttlefish-common/bin/cvd. The
+  # symlink in /usr/bin resolves to that path through /proc/self/exe.
+  if [ "$mode" = "user" ]; then
+    env_args=(
+      "HOME=$home"
+      "USER=$run_user"
+      "LOGNAME=$run_user"
+      "SHELL=/bin/bash"
+      "PATH=/usr/lib/cuttlefish-common/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      "TERM=${TERM:-dumb}"
+    )
+    for var in LANG LANGUAGE LC_ALL LC_CTYPE TZ \
+               http_proxy https_proxy no_proxy \
+               HTTP_PROXY HTTPS_PROXY NO_PROXY; do
+      if [ -n "${!var:-}" ]; then
+        env_args+=("${var}=${!var}")
+      fi
+    done
+
+    setpriv_args=(--reuid="$run_uid" --regid="$run_gid")
+    if [ -n "$run_groups" ]; then
+      setpriv_args+=(--groups="$run_groups")
+    fi
+
+    cd "$workdir"
+    exec chroot "$rootfs" /usr/bin/env -i "${env_args[@]}" \
+      /usr/bin/setpriv "${setpriv_args[@]}" -- "$@"
+  else
+    cd "$workdir"
+    exec chroot "$rootfs" /usr/bin/env -i \
+      "HOME=/root" "USER=root" "LOGNAME=root" "SHELL=/bin/bash" \
+      "PATH=/usr/lib/cuttlefish-common/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      "TERM=${TERM:-dumb}" "$@"
+  fi
+fi
+
+if [ "${1:-}" = "--bundle-info" ]; then
+  bundle_info
+  exit 0
+fi
+if [ "${1:-}" = "--bundle-help" ]; then
+  usage
+  exit 0
+fi
+
+[ -d "$ROOTFS" ] || die "rootfs not found: $ROOTFS (set CUTTLEFISH_BUNDLE_ROOT)"
+
+host_arch="$(uname -m)"
+bundle_arch="$(cat "$BUNDLE_DIR/ARCH" 2>/dev/null || true)"
+if [ -n "$bundle_arch" ] && [ "$host_arch" != "$bundle_arch" ]; then
+  die "this bundle is for $bundle_arch, but the host is $host_arch"
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  if [ "${CUTTLEFISH_BUNDLE_SUDO:-1}" = "0" ]; then
+    die "Cuttlefish must run as root (or with CUTTLEFISH_BUNDLE_SUDO=1)"
+  fi
+  command -v sudo >/dev/null 2>&1 || \
+    die "sudo is required to configure devices and networking"
+  exec sudo \
+    --preserve-env=CUTTLEFISH_BUNDLE_SUDO,CUTTLEFISH_BUNDLE_NO_SETUP,CUTTLEFISH_BUNDLE_ROOT,CUTTLEFISH_BUNDLE_STATE_DIR,http_proxy,https_proxy,no_proxy,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,TERM,LANG,LC_ALL \
+    "$SELF" "$@"
+fi
+
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+  run_user="$SUDO_USER"
+else
+  run_user="$(id -un)"
+fi
+run_uid="$(id -u "$run_user")"
+run_gid="$(id -g "$run_user")"
+run_home="$(getent passwd "$run_user" 2>/dev/null | cut -d: -f6 || true)"
+if [ -z "$run_home" ]; then
+  run_home="$(awk -F: -v u="$run_user" '$1 == u { print $6 }' /etc/passwd)"
+fi
+[ -n "$run_home" ] || run_home="/root"
+
+kvm_gid="$(stat -c '%g' /dev/kvm 2>/dev/null || true)"
+
+bundle_group_gid() {
+  chroot "$ROOTFS" getent group "$1" 2>/dev/null | cut -d: -f3 || true
+}
+
+# Make the invoking user resolvable inside the rootfs. cvd calls
+# getpwuid(getuid()) when it computes the default instance directories, and
+# cvd_refresh_groups calls initgroups(), so the numeric uid alone is not enough.
+ensure_bundle_user() {
+  if [ "$run_uid" -eq 0 ]; then
+    return 0
+  fi
+
+  local entry name
+  entry="$(chroot "$ROOTFS" getent passwd "$run_uid" 2>/dev/null || true)"
+  if [ -z "$entry" ]; then
+    if ! chroot "$ROOTFS" getent group "$run_gid" >/dev/null 2>&1; then
+      chroot "$ROOTFS" groupadd --gid "$run_gid" "$run_user" >/dev/null 2>&1 || \
+        chroot "$ROOTFS" groupadd --gid "$run_gid" "cvdg${run_gid}" >/dev/null 2>&1 || true
+    fi
+    chroot "$ROOTFS" useradd \
+      --uid "$run_uid" --gid "$run_gid" \
+      --home-dir "$run_home" --shell /bin/bash --no-create-home \
+      "$run_user" >/dev/null 2>&1 || \
+      warn "could not add user $run_user to the bundle rootfs"
+  fi
+
+  chroot "$ROOTFS" getent group cvdnetwork >/dev/null 2>&1 || \
+    chroot "$ROOTFS" groupadd --system cvdnetwork >/dev/null 2>&1 || true
+
+  if [ -n "$kvm_gid" ]; then
+    chroot "$ROOTFS" getent group "$kvm_gid" >/dev/null 2>&1 || \
+      chroot "$ROOTFS" groupadd --gid "$kvm_gid" kvm >/dev/null 2>&1 || true
+  fi
+  if ! chroot "$ROOTFS" getent group kvm >/dev/null 2>&1; then
+    chroot "$ROOTFS" groupadd --system kvm >/dev/null 2>&1 || true
+  fi
+
+  name="$(chroot "$ROOTFS" getent passwd "$run_uid" 2>/dev/null | cut -d: -f1 || true)"
+  if [ -n "$name" ]; then
+    chroot "$ROOTFS" usermod -aG cvdnetwork,kvm "$name" >/dev/null 2>&1 || \
+      warn "could not add $name to the cvdnetwork/kvm groups"
+  fi
+}
+
+compute_run_groups() {
+  local name host_groups bundle_groups
+  host_groups="$(id -G "$run_user" 2>/dev/null || true)"
+  bundle_groups=""
+  name="$(chroot "$ROOTFS" getent passwd "$run_uid" 2>/dev/null | cut -d: -f1 || true)"
+  if [ -n "$name" ]; then
+    bundle_groups="$(chroot "$ROOTFS" id -G "$name" 2>/dev/null || true)"
+  fi
+  printf '%s %s\n' "$host_groups" "$bundle_groups" | \
+    tr ' ' '\n' | awk 'NF && !seen[$0]++' | paste -sd, -
+}
+
+host_ready() {
+  [ -d /sys/class/net/cvd-ebr ] && [ -d /sys/class/net/cvd-wbr ]
+}
+
+apply_caps() {
+  local cvdalloc="$ROOTFS/usr/lib/cuttlefish-common/bin/cvdalloc"
+  local refresh="$ROOTFS/usr/lib/cuttlefish-common/bin/cvd_refresh_groups"
+
+  if [ ! -x "$cvdalloc" ]; then
+    warn "cvdalloc is missing from the bundle"
+    return 0
+  fi
+
+  if [ -x "$ROOTFS/usr/sbin/setcap" ]; then
+    chroot "$ROOTFS" /usr/sbin/setcap \
+      cap_net_admin,cap_net_bind_service,cap_net_raw=+ep \
+      /usr/lib/cuttlefish-common/bin/cvdalloc || \
+      warn "could not set capabilities on cvdalloc"
+    if [ -x "$refresh" ]; then
+      chroot "$ROOTFS" /usr/sbin/setcap cap_setgid=+ep \
+        /usr/lib/cuttlefish-common/bin/cvd_refresh_groups || \
+        warn "could not set capabilities on cvd_refresh_groups"
+    fi
+  elif command -v setcap >/dev/null 2>&1; then
+    setcap cap_net_admin,cap_net_bind_service,cap_net_raw=+ep "$cvdalloc" || \
+      warn "could not set capabilities on cvdalloc"
+    if [ -x "$refresh" ]; then
+      setcap cap_setgid=+ep "$refresh" || \
+        warn "could not set capabilities on cvd_refresh_groups"
+    fi
+  else
+    warn "setcap is not available; cvdalloc may not be able to create tap devices"
+  fi
+}
+
+setup_host() {
+  log "configuring host resources"
+
+  ensure_bundle_user
+
+  if [ ! -e /dev/kvm ]; then
+    warn "/dev/kvm is missing; enable virtualization in the BIOS and load the KVM module"
+  fi
+
+  if command -v modprobe >/dev/null 2>&1; then
+    for module in tun vhost_net vhost_vsock vhci-hcd bridge; do
+      modprobe "$module" 2>/dev/null || \
+        warn "could not load kernel module $module (it may be built in)"
+    done
+  else
+    warn "modprobe is not available; make sure vhost_net, vhost_vsock and vhci-hcd are loaded"
+  fi
+
+  # vhost-net/vhost-vsock are owned by root by default. The Debian package
+  # does this only inside containers, but the same permission is needed for a
+  # portable bundle because the user is not root.
+  local cvd_gid
+  cvd_gid="$(bundle_group_gid cvdnetwork || true)"
+  if [ -n "$cvd_gid" ]; then
+    for dev in /dev/vhost-net /dev/vhost-vsock; do
+      if [ -e "$dev" ]; then
+        chown root:"$cvd_gid" "$dev" 2>/dev/null || true
+        chmod 0660 "$dev" 2>/dev/null || true
+      fi
+    done
+  fi
+
+  local rule
+  for rule in "$ROOTFS"/lib/udev/rules.d/*cuttlefish*; do
+    [ -e "$rule" ] || continue
+    install -m 0644 "$rule" \
+      "/etc/udev/rules.d/99-bundle-$(basename "$rule")" 2>/dev/null || true
+  done
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=net >/dev/null 2>&1 || true
+  fi
+
+  apply_caps
+
+  if host_ready; then
+    log "host network resources already exist"
+  else
+    [ -x "$ROOTFS/etc/init.d/cuttlefish-host-resources" ] || \
+      die "invalid bundle: cuttlefish-host-resources is missing"
+    log "creating bridges, tap devices and DHCP servers"
+    run_in_rootfs root /etc/init.d/cuttlefish-host-resources start
+  fi
+
+  log "host setup complete"
+}
+
+teardown_host() {
+  log "removing host network resources"
+  if [ -x "$ROOTFS/etc/init.d/cuttlefish-host-resources" ] && \
+     { [ -e /sys/class/net/cvd-ebr ] || [ -e /sys/class/net/cvd-wbr ]; }; then
+    run_in_rootfs root /etc/init.d/cuttlefish-host-resources stop || \
+      warn "teardown reported errors; some resources may already be gone"
+  fi
+  rm -f /etc/udev/rules.d/99-bundle-*cuttlefish* 2>/dev/null || true
+  log "teardown complete"
+}
+
+run_in_rootfs() {
+  local mode="$1"
+  shift
+
+  command -v unshare >/dev/null 2>&1 || \
+    die "unshare(1) is required (it is part of util-linux)"
+
+  local groups=""
+  if [ "$mode" = "user" ]; then
+    groups="$(compute_run_groups)"
+  fi
+
+  CUTTLEFISH_ENTER_MODE="$mode" \
+  CUTTLEFISH_BUNDLE_ROOTFS="$ROOTFS" \
+  CUTTLEFISH_RUN_UID="$run_uid" \
+  CUTTLEFISH_RUN_GID="$run_gid" \
+  CUTTLEFISH_RUN_USER="$run_user" \
+  CUTTLEFISH_RUN_HOME="$run_home" \
+  CUTTLEFISH_RUN_GROUPS="$groups" \
+  unshare --mount --propagation private -- "$SELF" __enter "$@"
+}
+
+ensure_setup() {
+  ensure_bundle_user
+  if [ "${CUTTLEFISH_BUNDLE_NO_SETUP:-0}" = "1" ]; then
+    warn "automatic host setup is disabled"
+    return 0
+  fi
+  if ! host_ready; then
+    setup_host
+  fi
+}
+
+case "${1:-}" in
+  --setup)
+    shift
+    ensure_bundle_user
+    setup_host
+    exit 0
+    ;;
+  --teardown)
+    shift
+    teardown_host
+    exit 0
+    ;;
+  --shell)
+    shift
+    ensure_setup
+    run_in_rootfs user /bin/bash -l "$@"
+    exit $?
+    ;;
+  --help|-h|help|version|--version)
+    # Do not configure the host just to print help.
+    run_in_rootfs user "$CVD_BIN" "$@"
+    exit $?
+    ;;
+esac
+
+[ -x "$ROOTFS$CVD_BIN" ] || \
+  die "invalid bundle: $ROOTFS$CVD_BIN is missing"
+
+ensure_setup
+run_in_rootfs user "$CVD_BIN" "$@"

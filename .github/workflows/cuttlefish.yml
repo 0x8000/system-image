@@ -1,0 +1,277 @@
+name: Cuttlefish bundle
+
+# Builds google/android-cuttlefish from source with upstream's own build
+# container, then packages the resulting cuttlefish-base/cuttlefish-user debs
+# into a portable Debian 13 rootfs bundle and publishes it to GitHub Releases:
+#
+#   cuttlefish-<version>-x86_64.tar.zst[.sha256]  rootfs + cvd wrapper
+#   cuttlefish-<version>-x86_64.run[.sha256]      self-extracting variant
+#
+# Run it manually (workflow_dispatch) with ref=latest by default; the weekly
+# cron picks up new upstream release tags and skips when a release already
+# exists for that tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: android-cuttlefish tag/branch/commit ("latest" = newest release tag)
+        required: false
+        default: latest
+      force:
+        description: Rebuild and overwrite the release even if it already exists
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    - cron: "23 4 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/cuttlefish.yml"
+      - "cuttlefish/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cuttlefish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck cuttlefish/cvd cuttlefish/build-bundle.sh
+          bash -n cuttlefish/cvd cuttlefish/build-bundle.sh
+
+  prepare:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      INPUT_REF: ${{ github.event.inputs.ref }}
+      FORCE: ${{ github.event.inputs.force || 'false' }}
+    steps:
+      - id: resolve
+        run: |
+          set -euo pipefail
+          ref="${INPUT_REF:-latest}"
+          if [ -z "$ref" ] || [ "$ref" = "latest" ]; then
+            ref="$(git ls-remote --tags --refs https://github.com/google/android-cuttlefish.git \
+              | sed 's#.*refs/tags/##' \
+              | grep -E '^v[0-9]+(\.[0-9]+)+$' \
+              | sort -V | tail -n1)"
+            [ -n "$ref" ] || { echo "no upstream release tags found" >&2; exit 1; }
+          fi
+          release_tag="cuttlefish-${ref//\//-}"
+          should_build=true
+          if [ "$FORCE" != "true" ] && [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            if gh release view "$release_tag" >/dev/null 2>&1; then
+              echo "release $release_tag already exists; skipping scheduled build"
+              should_build=false
+            fi
+          fi
+          {
+            echo "ref=$ref"
+            echo "release_tag=$release_tag"
+            echo "should_build=$should_build"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    outputs:
+      ref: ${{ needs.prepare.outputs.ref }}
+      release_tag: ${{ needs.prepare.outputs.release_tag }}
+      version: ${{ steps.debs.outputs.version }}
+      commit: ${{ steps.clone.outputs.commit }}
+    env:
+      REF: ${{ needs.prepare.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+            /usr/share/miniconda /usr/local/.ghcup /usr/share/haskell
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Restore Bazel caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazelisk
+            ~/.cache/bazel
+            ~/bazel-disk
+          key: cuttlefish-bazel-${{ needs.prepare.outputs.release_tag }}
+          restore-keys: |
+            cuttlefish-bazel-
+
+      - id: clone
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/android-cuttlefish"
+          rm -rf "$dir"
+          if [[ "$REF" =~ ^[0-9a-f]{7,40}$ ]]; then
+            git clone --filter=blob:none https://github.com/google/android-cuttlefish.git "$dir"
+            git -C "$dir" checkout "$REF"
+          else
+            git clone --depth 1 --branch "$REF" https://github.com/google/android-cuttlefish.git "$dir"
+          fi
+          echo "commit=$(git -C "$dir" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build Debian packages (base, frontend)
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/android-cuttlefish"
+          cd "$dir"
+          mkdir -p "$HOME/bazel-disk"
+          docker build \
+            --file tools/buildutils/cw/Containerfile \
+            --tag cuttlefish-build:ci .
+          for pkg in base frontend; do
+            docker run --rm \
+              --volume "$dir:/mnt/build" \
+              --volume "$HOME/.cache/bazel:/root/.cache/bazel" \
+              --volume "$HOME/.cache/bazelisk:/root/.cache/bazelisk" \
+              --volume "$HOME/bazel-disk:/root/bazel-disk" \
+              --workdir /mnt/build \
+              cuttlefish-build:ci "$pkg" -d /root/bazel-disk
+          done
+
+      - id: debs
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/android-cuttlefish"
+          mkdir -p "$RUNNER_TEMP/debs"
+          mv "$dir"/cuttlefish-base_*_amd64.deb "$dir"/cuttlefish-user_*_amd64.deb \
+            "$RUNNER_TEMP/debs/"
+          base_deb="$(find "$RUNNER_TEMP/debs" -name 'cuttlefish-base_*_amd64.deb')"
+          dpkg-deb -c "$base_deb" | grep -q 'usr/lib/cuttlefish-common/bin/cvd$' \
+            || { echo "cvd missing from $base_deb" >&2; exit 1; }
+          version="$(dpkg-deb -f "$base_deb" Version)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          ls -lh "$RUNNER_TEMP/debs"
+
+      - name: Fix cache ownership for the runner user
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" \
+            "$HOME/.cache/bazel" "$HOME/.cache/bazelisk" "$HOME/bazel-disk" \
+            2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cuttlefish-debs
+          path: ${{ runner.temp }}/debs
+          retention-days: 1
+          if-no-files-found: error
+
+  bundle:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      REF: ${{ needs.build.outputs.ref }}
+      RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+      VERSION: ${{ needs.build.outputs.version }}
+      COMMIT: ${{ needs.build.outputs.commit }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cuttlefish-debs
+          path: debs
+
+      - name: Build the portable bundle
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "$PWD:/work" \
+            --workdir /work \
+            --env VERSION="$VERSION" \
+            --env REF="$REF" \
+            --env COMMIT="$COMMIT" \
+            debian:13 \
+            bash -euo pipefail -c '
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                ca-certificates debootstrap zstd debian-archive-keyring
+              ./cuttlefish/build-bundle.sh \
+                --debs /work/debs \
+                --dist /work/dist \
+                --version "$VERSION" \
+                --ref "$REF" \
+                --commit "$COMMIT" \
+                --arch amd64
+            '
+          sudo chown -R "$(id -u):$(id -g)" dist
+          ls -lh dist
+
+      - name: Publish release
+        run: |
+          set -euo pipefail
+          task_dir="$(find dist -maxdepth 1 -type d -name "cuttlefish-*" | head -n1 | xargs basename)"
+          built="$(sed -n 's/^built: //p' "dist/$task_dir/VERSION")"
+          notes="$RUNNER_TEMP/release-notes.md"
+          cat > "$notes" <<'EOF'
+          Automated build of [google/android-cuttlefish](https://github.com/google/android-cuttlefish) @REF@
+          ([@COMMIT@](https://github.com/google/android-cuttlefish/commit/@COMMIT@)),
+          built @BUILT@.
+
+          ## Contents
+
+          - `cuttlefish-@VERSION@-x86_64.tar.zst` — Debian 13 rootfs with `cuttlefish-base`
+            + `cuttlefish-user` (`cvd`, `crosvm`, orchestrator, all runtime dependencies) and a
+            `cvd` wrapper
+          - `cuttlefish-@VERSION@-x86_64.run` — the same bundle, self-extracting
+          - `.sha256` checksums
+
+          ## Quick start
+
+          ```sh
+          # or: sh cuttlefish-@VERSION@-x86_64.run (needs tar and zstd)
+          tar --zstd -xf cuttlefish-@VERSION@-x86_64.tar.zst
+          cd cuttlefish-@VERSION@-x86_64
+          ./cvd --setup
+          mkdir cf-work && cd cf-work
+          ../cvd fetch --default_build=aosp-android-latest-release/aosp_cf_x86_64_only_phone-userdebug
+          ../cvd create --product_path="$PWD"
+          ../cvd status
+          ```
+
+          Requirements: `/dev/kvm`, `sudo`, x86_64 Linux. Full guide: `README.md` in the bundle.
+          EOF
+          sed -i \
+            -e "s|@VERSION@|$VERSION|g" \
+            -e "s|@REF@|$REF|g" \
+            -e "s|@COMMIT@|$COMMIT|g" \
+            -e "s|@BUILT@|$built|g" \
+            "$notes"
+          assets=(dist/cuttlefish-*x86_64.tar.zst dist/cuttlefish-*x86_64.run dist/*.sha256)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --title "Cuttlefish $REF" --notes-file "$notes"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "Cuttlefish $REF" \
+              --notes-file "$notes"
+          fi
+          gh release view "$RELEASE_TAG"
