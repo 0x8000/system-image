@@ -159,6 +159,7 @@ jobs:
           PY
           docker build -q -t windows-vm-splitter:probe /tmp/probe/ctx
           container=$(docker create windows-vm-splitter:probe)
+          mkdir -p /tmp/probe/extracted
           docker cp "$container:/parts" /tmp/probe/extracted/
           docker rm -f "$container" >/dev/null
           # The same concatenation fetch-image.sh performs, minus the pull.
@@ -175,6 +176,8 @@ jobs:
       accelerator: ${{ steps.kvm.outputs.accelerator }}
       bootable: ${{ steps.kvm.outputs.bootable }}
     steps:
+      - uses: actions/checkout@v4
+
       - id: kvm
         env:
           # PR events have no workflow inputs, so the default is resolved here
